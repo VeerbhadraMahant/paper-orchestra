@@ -1,0 +1,13 @@
+[project]
+name = "citebench"
+version = "0.0.1"
+description = "Benchmark and study of citation claim-support checking in ML literature surveys"
+requires-python = ">=3.11"
+dependencies = ["requests", "bibtexparser==1.4.3", "pylatexenc", "thefuzz"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
