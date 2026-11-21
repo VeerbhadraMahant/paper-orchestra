@@ -1,6 +1,8 @@
 """Find the best freely available text (full text, else abstract) for each cited reference.
 
-Free sources only, no keys, no contact details: arXiv, Semantic Scholar (unauthenticated), OpenAlex.
+Free sources only, no keys, no contact details: arXiv, Semantic Scholar (unauthenticated), OpenAlex,
+ACL Anthology and Europe PMC (both reached through Semantic Scholar external ids).
+Bot protection is never worked around: 403s and challenge pages are recorded and the next source is tried.
 Every HTTP response is cached on disk, so a rerun makes no network calls.
 
 Usage: python -m citebench.fetch units.jsonl --out sources.jsonl --cache .cache/citebench
@@ -34,10 +36,12 @@ MAX_RETRIES = 3
 MAX_PDF_BYTES = 40 * 1024 * 1024
 MIN_TEXT_CHARS = 2000
 # minimum seconds between requests, per rate-limit group
-MIN_INTERVAL = {"semanticscholar": 1.1, "arxiv": 3.0}
+MIN_INTERVAL = {"semanticscholar": 1.1, "arxiv": 3.0, "aclanthology.org": 1.0, "ebi.ac.uk": 1.0}
 S2 = "https://api.semanticscholar.org/graph/v1"
 S2_FIELDS = "title,abstract,year,externalIds,openAccessPdf"
 OPENALEX = "https://api.openalex.org/works"
+OA_SELECT = "id,title,display_name,abstract_inverted_index,best_oa_location,primary_location,locations,open_access"
+EPMC = "https://www.ebi.ac.uk/europepmc/webservices/rest"
 ATOM = "{http://www.w3.org/2005/Atom}"
 TRANSIENT = re.compile(r"network_error|http_429|http_5\d\d|internal:")
 CACHEABLE_PDF_ERR = re.compile(r"not_pdf|pdf_too_large|pdf_unreadable|pdf_too_short|http_4(?!29)")
@@ -53,7 +57,8 @@ class Cand:
     url: str
     title: Optional[str]
     abstract: Optional[str]
-    pdf_url: Optional[str] = None
+    pdfs: tuple[str, ...] = ()  # candidate PDF urls, best first
+    xml: Optional[str] = None  # Europe PMC full-text XML url
 
 
 def norm_title(t: Optional[str]) -> str:
@@ -184,7 +189,7 @@ class Fetcher:
         if d["status"] == 404:
             return None
         if d["status"] != 200:
-            raise FetchError(f"http_{d['status']}")
+            raise FetchError("http_202_challenge" if d["status"] == 202 else f"http_{d['status']}")
         return d["body"]
 
     def _json(self, url: str):
@@ -220,6 +225,16 @@ class Fetcher:
         _atomic_write(p, json.dumps({"url": url, "sha256": sha}))
         return sha
 
+    def _xml_sha(self, url: str) -> str:
+        """Europe PMC full-text XML to plain text, stored; same minimum-length rule as PDFs."""
+        body = self._body(url, "xml")  # refuses DOCTYPE/ENTITY
+        if body is None:
+            raise FetchError("http_404")
+        text = " ".join(" ".join(ET.fromstring(body).itertext()).split())
+        if len(text) < MIN_TEXT_CHARS:
+            raise FetchError("xml_too_short")
+        return self._store(text)
+
     def _extract_pdf(self, url: str) -> str:
         try:
             return self._extract_pdf_unsafe(url)
@@ -234,7 +249,7 @@ class Fetcher:
         r = self._get(url, stream=True)
         try:
             if r.status_code != 200:
-                raise FetchError(f"http_{r.status_code}")
+                raise FetchError("http_202_challenge" if r.status_code == 202 else f"http_{r.status_code}")
             cl = r.headers.get("Content-Length") or ""
             if cl.isdigit() and int(cl) > MAX_PDF_BYTES:
                 raise FetchError("pdf_too_large")
@@ -268,7 +283,23 @@ class Fetcher:
         if entry is None or "api/errors" in (entry.findtext(ATOM + "id") or ""):
             return None
         t, s = (" ".join((entry.findtext(ATOM + k) or "").split()) or None for k in ("title", "summary"))
-        return Cand("arxiv", f"https://arxiv.org/abs/{aid}", t, s, f"https://arxiv.org/pdf/{aid}")
+        return Cand("arxiv", f"https://arxiv.org/abs/{aid}", t, s, (f"https://arxiv.org/pdf/{aid}",))
+
+    def _arxiv_title(self, ref: Reference) -> Optional[Cand]:
+        """Last resort: first title-search hit that matches the title and, if the year is known, is within 1 year."""
+        q = quote(f'ti:"{ref.title}"', safe=":")
+        body = self._body(f"https://export.arxiv.org/api/query?search_query={q}&max_results=3", "xml")
+        for entry in (ET.fromstring(body).findall(ATOM + "entry") if body else []):
+            t, s = (" ".join((entry.findtext(ATOM + k) or "").split()) or None for k in ("title", "summary"))
+            if fuzz.token_sort_ratio(norm_title(ref.title), norm_title(t)) < self.min_match:
+                continue
+            year = (entry.findtext(ATOM + "published") or "")[:4]  # first-version date
+            if ref.year and not (year.isdigit() and abs(int(year) - ref.year) <= 1):
+                continue
+            aid = re.sub(r"v\d+$", "", (entry.findtext(ATOM + "id") or "").rsplit("/abs/", 1)[-1])
+            if aid:
+                return Cand("arxiv_title_search", f"https://arxiv.org/abs/{aid}", t, s, (f"https://arxiv.org/pdf/{aid}",))
+        return None
 
     def _s2(self, ref: Reference) -> Optional[Cand]:
         lookups = []
@@ -281,42 +312,57 @@ class Fetcher:
             paper = ((d or {}).get("data") or [None])[0] if wrapped else d
             if not paper:
                 continue
-            arx = (paper.get("externalIds") or {}).get("ArXiv")
+            ids = paper.get("externalIds") or {}
             oa = (paper.get("openAccessPdf") or {}).get("url")
-            pdf = f"https://arxiv.org/pdf/{arx}" if arx else oa
+            pdfs = [u for u in (f"https://arxiv.org/pdf/{ids['ArXiv']}" if ids.get("ArXiv") else None,
+                                f"https://aclanthology.org/{ids['ACL']}.pdf" if ids.get("ACL") else None, oa) if u]
+            pmc = str(ids.get("PubMedCentral") or "").removeprefix("PMC")
             return Cand("semantic_scholar", f"https://www.semanticscholar.org/paper/{paper.get('paperId', '')}",
-                        paper.get("title"), paper.get("abstract"), pdf)
+                        paper.get("title"), paper.get("abstract"), tuple(dict.fromkeys(pdfs)),
+                        f"{EPMC}/PMC{pmc}/fullTextXML" if pmc else None)
         return None
 
     def _openalex(self, ref: Reference) -> Optional[Cand]:
         if ref.doi:
-            url = f"{OPENALEX}?filter=doi:{quote(clean_doi(ref.doi), safe='/:()')}"
+            url = f"{OPENALEX}?filter=doi:{quote(clean_doi(ref.doi), safe='/:()')}&select={OA_SELECT}"
         elif ref.title:
-            url = f"{OPENALEX}?search={quote(ref.title)}&per-page=1"
+            url = f"{OPENALEX}?search={quote(ref.title)}&per-page=1&select={OA_SELECT}"
         else:
             return None
         d = self._json(url)
         w = ((d or {}).get("results") or [None])[0]
         if not w:
             return None
-        pdf = (w.get("best_oa_location") or {}).get("pdf_url")
+        pdfs = [(w.get("best_oa_location") or {}).get("pdf_url")]  # best location is open access by definition
+        pdfs += [loc.get("pdf_url") for loc in [w.get("primary_location"), *(w.get("locations") or [])]
+                 if loc and loc.get("is_oa")]
         oa = (w.get("open_access") or {}).get("oa_url")
-        if not pdf and oa and re.search(r"\.pdf($|\?)|/pdf", oa):
-            pdf = oa
+        if oa and re.search(r"\.pdf($|\?)|/pdf", oa):
+            pdfs.append(oa)
         return Cand("openalex", w.get("id") or url, w.get("title") or w.get("display_name"),
-                    rebuild_abstract(w.get("abstract_inverted_index")), pdf)
+                    rebuild_abstract(w.get("abstract_inverted_index")), tuple(dict.fromkeys(u for u in pdfs if u)))
 
     def _candidates(self, ref: Reference, errors: list[str]) -> Iterator[Cand]:
         stages = []
         if ref.arxiv_id:
             stages.append(lambda: self._arxiv(ref.arxiv_id))
         stages += [lambda: self._s2(ref), lambda: self._openalex(ref)]
+        arxiv_seen = bool(ref.arxiv_id)
         for stage in stages:
             try:
                 c = stage()
             except FetchError as e:
                 errors.append(str(e))
                 continue
+            if c:
+                arxiv_seen |= any("arxiv.org/" in u for u in c.pdfs)
+                yield c
+        if not arxiv_seen and ref.title:  # lazy: only reached when nothing earlier gave full text
+            try:
+                c = self._arxiv_title(ref)
+            except FetchError as e:
+                errors.append(str(e))
+                return
             if c:
                 yield c
 
@@ -343,15 +389,19 @@ class Fetcher:
                 continue
             meta = dict(matched_title=c.title, match_score=score)
             why = None
-            if c.pdf_url and c.pdf_url not in tried:
-                tried.add(c.pdf_url)
+            for u in (*c.pdfs, *([c.xml] if c.xml else [])):
+                if u in tried:
+                    continue
+                tried.add(u)
                 try:
-                    sha = self._pdf_sha(c.pdf_url)
-                    name = "arxiv" if "arxiv.org/" in c.pdf_url else c.name
-                    return rec("full_text", source_name=name, source_url=c.pdf_url, text_sha256=sha,
-                               text_path=f"texts/{sha}.txt", **meta)
+                    sha = self._xml_sha(u) if u == c.xml else self._pdf_sha(u)
                 except FetchError as e:
-                    why = f"full_text_failed:{e}"
+                    why = why or f"full_text_failed:{e}"
+                    continue
+                name = ("europe_pmc" if u == c.xml else c.name if c.name.startswith("arxiv")
+                        else "arxiv" if "arxiv.org/" in u else c.name)
+                return rec("full_text", source_name=name, source_url=u, text_sha256=sha,
+                           text_path=f"texts/{sha}.txt", **meta)
             if c.abstract and fallback is None:
                 fallback = (c, meta, why)
             elif not c.abstract and no_text is None:

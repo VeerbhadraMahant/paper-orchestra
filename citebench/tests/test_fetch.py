@@ -330,7 +330,7 @@ def test_arxiv_uses_https(tmp_path):
 
 
 def test_only_200_and_404_are_cached(tmp_path):
-    f, s = fetcher(tmp_path, {"api.semanticscholar": R(403), "api.openalex": R(text="not json")})
+    f, s = fetcher(tmp_path, {"api.semanticscholar": R(403), "api.openalex": R(text="not json"), "export.arxiv.org": R(403)})
     fetch(f, title=TITLE)
     assert not (tmp_path / "cache" / "http").exists() or not list((tmp_path / "cache" / "http").glob("*.json"))
     fetch(f, title=TITLE)
@@ -350,3 +350,90 @@ def test_pymupdf_import_error_falls_back_to_abstract(tmp_path, monkeypatch):
     r = fetch(f, title=TITLE, arxiv_id="1706.03762")
     assert r.access_level == "abstract" and r.error.startswith("full_text_failed:pdf_error:")
     assert not (tmp_path / "cache" / "pdf").exists()  # environment failure is not cached
+
+
+# ---- fetch2: more locations, ACL, Europe PMC, arXiv title search, 202 ----
+
+def oa_w(**kw):
+    return {"id": "W1", "title": TITLE, **kw}
+
+
+def test_openalex_later_location_succeeds_after_first_fails_and_dedups(tmp_path):
+    w = oa_w(best_oa_location={"pdf_url": "https://a.example.org/p.pdf", "is_oa": True},
+             primary_location={"pdf_url": "https://a.example.org/p.pdf", "is_oa": True},
+             locations=[{"pdf_url": "https://closed.example.org/p.pdf", "is_oa": False},
+                        {"pdf_url": "https://a.example.org/p.pdf", "is_oa": True},
+                        {"pdf_url": "https://b.example.org/p.pdf", "is_oa": True}])
+    f, s = fetcher(tmp_path, {"api.openalex.org": R(text=json.dumps({"results": [w]})),
+                              "a.example.org": R(403), "b.example.org": R(content=make_pdf())})
+    r = fetch(f, title=TITLE)
+    assert (r.access_level, r.source_url) == ("full_text", "https://b.example.org/p.pdf")
+    assert s.n("a.example.org") == 1 and s.n("closed.example.org") == 0  # dedup, non-OA skipped
+    assert "select=" in [c for c in s.calls if "openalex" in c][0]
+
+
+def test_s2_acl_anthology_pdf(tmp_path):
+    body = json.dumps({"data": [{**s2(), "externalIds": {"ACL": "P02-1040"}}]})
+    f, s = fetcher(tmp_path, {"paper/search/match": R(text=body), "aclanthology.org/P02-1040.pdf": R(content=make_pdf())})
+    r = fetch(f, title=TITLE)
+    assert (r.access_level, r.source_url) == ("full_text", "https://aclanthology.org/P02-1040.pdf")
+
+
+def pmc_xml(body="medical text " * 300, extra=""):
+    return f'<?xml version="1.0"?>{extra}<article><body><p>{body}<b>bold</b></p></body></article>'
+
+
+def pmc_s2():
+    return {"paper/search/match": R(text=json.dumps({"data": [{**s2(), "externalIds": {"PubMedCentral": "123"}}]}))}
+
+
+def test_europe_pmc_xml_full_text_strips_tags(tmp_path):
+    f, s = fetcher(tmp_path, {**pmc_s2(), "europepmc/webservices/rest/PMC123/fullTextXML": R(text=pmc_xml())})
+    r = fetch(f, title=TITLE)
+    assert (r.access_level, r.source_name) == ("full_text", "europe_pmc")
+    txt = (tmp_path / "cache" / r.text_path).read_text(encoding="utf-8")
+    assert "<" not in txt and txt.endswith("bold") and len(txt) >= 2000
+
+
+def test_europe_pmc_doctype_and_short_rejected(tmp_path):
+    evil = pmc_xml(extra='<!DOCTYPE a [<!ENTITY x "y">]>')
+    f, _ = fetcher(tmp_path, {**pmc_s2(), "fullTextXML": R(text=evil)})
+    assert fetch(f, title=TITLE).error == "full_text_failed:bad_xml_doctype"
+    f, _ = fetcher(tmp_path / "2", {**pmc_s2(), "fullTextXML": R(text=pmc_xml("short"))})
+    assert fetch(f, title=TITLE).error == "full_text_failed:xml_too_short"
+
+
+def atom2(title=TITLE, published="2017-06-12T17:57:34Z"):
+    return (f'<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>http://arxiv.org/abs/1706.03762v7</id>'
+            f"<published>{published}</published><title>{title}</title><summary>Abs.</summary></entry></feed>")
+
+
+def title_search(tmp_path, feed, **ref):
+    f, s = fetcher(tmp_path, {"search_query=": R(text=feed), "arxiv.org/pdf/1706.03762": R(content=make_pdf())})
+    return fetch(f, title=TITLE, **ref), s
+
+
+def test_arxiv_title_search_accept(tmp_path):
+    r, s = title_search(tmp_path, atom2(), year=2018)
+    assert (r.access_level, r.source_name, r.source_url) == ("full_text", "arxiv_title_search", "https://arxiv.org/pdf/1706.03762")
+    assert "ti:%22" in [c for c in s.calls if "search_query" in c][0]
+
+
+def test_arxiv_title_search_rejects_low_title_and_year_mismatch(tmp_path):
+    r, s = title_search(tmp_path / "a", atom2(title="Completely Different Paper On Graphs"))
+    assert r.access_level == "none" and s.n("arxiv.org/pdf") == 0
+    r, s = title_search(tmp_path / "b", atom2(), year=2010)
+    assert r.access_level == "none" and s.n("arxiv.org/pdf") == 0
+
+
+def test_arxiv_title_search_skipped_when_arxiv_id_known(tmp_path):
+    f, s = fetcher(tmp_path, {"export.arxiv.org/api/query?id_list": R(text=atom())})
+    fetch(f, title=TITLE, arxiv_id="1706.03762")
+    assert s.n("search_query") == 0
+
+
+def test_http_202_recorded_as_challenge(tmp_path):
+    w = oa_w(best_oa_location={"pdf_url": "https://pub.example.org/p.pdf"}, abstract_inverted_index={"Hi": [0]})
+    f, _ = fetcher(tmp_path, {"api.openalex.org": R(text=json.dumps({"results": [w]})), "pub.example.org": R(202, "wait")})
+    r = fetch(f, title=TITLE)
+    assert (r.access_level, r.error) == ("abstract", "full_text_failed:http_202_challenge")
