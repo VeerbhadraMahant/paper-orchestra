@@ -1,9 +1,10 @@
 import json
+import sys
 
 import pymupdf
 import requests
 
-from citebench.fetch import Fetcher, rebuild_abstract, run
+from citebench.fetch import Fetcher, latest_records, rebuild_abstract, run
 from citebench.units import Reference, SourceRecord, Unit, read_jsonl, write_jsonl
 
 TITLE = "Attention Is All You Need"
@@ -26,6 +27,13 @@ class R:
     def __init__(self, status=200, text="", content=None, headers=None):
         self.status_code, self.text, self.headers = status, text, headers or {}
         self.content = text.encode() if content is None else content
+
+    def iter_content(self, size):
+        for i in range(0, len(self.content), size):
+            yield self.content[i:i + size]
+
+    def close(self):
+        pass
 
 
 class Stub:
@@ -212,3 +220,133 @@ def test_run_survives_internal_error(tmp_path):
     f.fetch_reference = lambda sid, key, ref: 1 / 0 if key == "a" else Fetcher.fetch_reference(f, sid, key, ref)
     recs = run(units, out, f)
     assert [r.error for r in recs] == ["internal:ZeroDivisionError", "missing_bib_entry"]
+
+
+# ---- review fixes ----
+
+def pdf_routes(**extra):
+    return {"export.arxiv.org/api": R(text=atom()), "arxiv.org/pdf/": R(content=make_pdf()), **extra}
+
+
+def test_resume_retries_transient_and_uses_last_record(tmp_path):
+    units, out = tmp_path / "u.jsonl", tmp_path / "o.jsonl"
+    ra = Reference(key="a", title=TITLE, arxiv_id="1706.03762")
+    write_jsonl(units, [unit("a", ra), unit("b", Reference(key="b", title=TITLE, arxiv_id="1706.03762"))])
+    write_jsonl(out, [SourceRecord(cite_key="a", survey_id="sv", access_level="none", error="http_503"),
+                      SourceRecord(cite_key="b", survey_id="sv", access_level="none", error="low_title_match")])
+    f, s = fetcher(tmp_path, pdf_routes())
+    recs = run(units, out, f)
+    assert s.calls  # "a" retried, "b" (permanent) not
+    assert {r.cite_key: r.access_level for r in recs} == {"a": "full_text", "b": "none"}
+    assert len(list(read_jsonl(out, SourceRecord))) == 3  # appended
+    assert latest_records(out)[("sv", "a")].access_level == "full_text"
+    f2, s2_ = fetcher(tmp_path)
+    run(units, out, f2)
+    assert s2_.calls == []
+
+
+def test_resume_internal_error_is_retried(tmp_path):
+    units, out = tmp_path / "u.jsonl", tmp_path / "o.jsonl"
+    write_jsonl(units, [unit("b", None)])
+    write_jsonl(out, [SourceRecord(cite_key="b", survey_id="sv", access_level="none", error="internal:ZeroDivisionError")])
+    f, _ = fetcher(tmp_path)
+    assert run(units, out, f)[0].error == "missing_bib_entry"
+
+
+def test_pdf_size_cap_content_length(tmp_path):
+    big = R(content=make_pdf(), headers={"Content-Length": str(100 * 1024 * 1024)})
+    big.iter_content = lambda size: (_ for _ in ()).throw(AssertionError("body must not be read"))
+    f, _ = fetcher(tmp_path, {"export.arxiv.org/api": R(text=atom()), "arxiv.org/pdf/": big})
+    assert fetch(f, title=TITLE, arxiv_id="1706.03762").error == "full_text_failed:pdf_too_large"
+
+
+def test_pdf_size_cap_streaming_total(tmp_path, monkeypatch):
+    monkeypatch.setattr("citebench.fetch.MAX_PDF_BYTES", 1000)
+    f, _ = fetcher(tmp_path, pdf_routes())  # no Content-Length header; body is larger than 1000 bytes
+    assert fetch(f, title=TITLE, arxiv_id="1706.03762").error == "full_text_failed:pdf_too_large"
+
+
+def test_falls_through_to_later_source_with_full_text(tmp_path):
+    w = {"id": "W1", "title": TITLE, "best_oa_location": {"pdf_url": "https://oa.example.org/p.pdf"}}
+    f, s = fetcher(tmp_path, {"export.arxiv.org/api": R(text=atom()), "arxiv.org/pdf/": R(text="<html/>"),
+                              "api.openalex.org": R(text=json.dumps({"results": [w]})),
+                              "oa.example.org": R(content=make_pdf())})
+    r = fetch(f, title=TITLE, arxiv_id="1706.03762")
+    assert (r.access_level, r.source_name, r.source_url) == ("full_text", "openalex", "https://oa.example.org/p.pdf")
+
+
+def test_abstract_kept_when_no_full_text_anywhere(tmp_path):
+    w = {"id": "W1", "title": TITLE, "best_oa_location": {"pdf_url": "https://oa.example.org/p.pdf"}}
+    f, _ = fetcher(tmp_path, {"export.arxiv.org/api": R(text=atom()), "arxiv.org/pdf/": R(text="<html/>"),
+                              "api.openalex.org": R(text=json.dumps({"results": [w]})),
+                              "oa.example.org": R(text="<html/>")})
+    r = fetch(f, title=TITLE, arxiv_id="1706.03762")
+    assert (r.access_level, r.source_name) == ("abstract", "arxiv") and r.error == "full_text_failed:not_pdf"
+
+
+def test_mismatched_later_candidate_not_tried(tmp_path):
+    body = json.dumps({"data": [s2(title="Something Else Entirely", pdf="https://oa.example.org/p.pdf")]})
+    f, s = fetcher(tmp_path, {"export.arxiv.org/api": R(text=atom()), "arxiv.org/pdf/": R(text="<html/>"),
+                              "paper/search/match": R(text=body)})
+    fetch(f, title=TITLE, arxiv_id="1706.03762")
+    assert s.n("oa.example.org") == 0
+
+
+def test_corrupted_cache_files_are_misses(tmp_path):
+    f, s = fetcher(tmp_path, pdf_routes())
+    r1 = fetch(f, title=TITLE, arxiv_id="1706.03762")
+    for p in (tmp_path / "cache").glob("*/*.json"):
+        p.write_text("{not json", encoding="utf-8")
+    r2 = fetch(f, title=TITLE, arxiv_id="1706.03762")
+    assert r2.text_sha256 == r1.text_sha256 and r2.access_level == "full_text"
+    assert all(json.loads(p.read_text(encoding="utf-8")) for p in (tmp_path / "cache").glob("*/*.json"))
+
+
+def test_malformed_last_line_skipped_and_next_append_on_new_line(tmp_path):
+    units, out = tmp_path / "u.jsonl", tmp_path / "o.jsonl"
+    write_jsonl(units, [unit("a", None), unit("b", None)])
+    write_jsonl(out, [SourceRecord(cite_key="a", survey_id="sv", access_level="none", error="missing_bib_entry")])
+    with open(out, "a", encoding="utf-8") as fh:
+        fh.write('{"cite_key": "b", "surv')  # torn write, no newline
+    f, _ = fetcher(tmp_path)
+    run(units, out, f)
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3 and lines[1].startswith('{"cite_key": "b", "surv')
+    assert set(latest_records(out)) == {("sv", "a"), ("sv", "b")}
+
+
+def test_doctype_rejected_and_not_cached(tmp_path):
+    evil = '<?xml version="1.0"?><!DOCTYPE feed [<!ENTITY a "x">]>' + atom()
+    f, s = fetcher(tmp_path, {"export.arxiv.org/api": R(text=evil)})
+    r = fetch(f, title=TITLE, arxiv_id="1706.03762")
+    assert (r.access_level, r.error) == ("none", "bad_xml_doctype")
+    assert not list((tmp_path / "cache").glob("http/*arxiv*")) and s.n("export.arxiv.org") == 1
+
+
+def test_arxiv_uses_https(tmp_path):
+    f, s = fetcher(tmp_path, {"export.arxiv.org/api": R(text=atom())})
+    fetch(f, title=TITLE, arxiv_id="1706.03762")
+    assert s.calls[0].startswith("https://export.arxiv.org/")
+
+
+def test_only_200_and_404_are_cached(tmp_path):
+    f, s = fetcher(tmp_path, {"api.semanticscholar": R(403), "api.openalex": R(text="not json")})
+    fetch(f, title=TITLE)
+    assert not (tmp_path / "cache" / "http").exists() or not list((tmp_path / "cache" / "http").glob("*.json"))
+    fetch(f, title=TITLE)
+    assert s.n("api.semanticscholar") == 2  # asked again, not served from cache
+
+
+def test_404_is_cached(tmp_path):
+    f, s = fetcher(tmp_path)
+    fetch(f, title=TITLE)
+    fetch(f, title=TITLE)
+    assert s.n("api.openalex") == 1
+
+
+def test_pymupdf_import_error_falls_back_to_abstract(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "pymupdf", None)  # makes `import pymupdf` raise ImportError
+    f, _ = fetcher(tmp_path, pdf_routes())
+    r = fetch(f, title=TITLE, arxiv_id="1706.03762")
+    assert r.access_level == "abstract" and r.error.startswith("full_text_failed:pdf_error:")
+    assert not (tmp_path / "cache" / "pdf").exists()  # environment failure is not cached
