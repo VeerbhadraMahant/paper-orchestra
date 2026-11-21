@@ -1,0 +1,18 @@
+\documentclass{article}
+\usepackage{natbib}
+\newcommand{\foo}{Preamble sentence. \cite{preamble}}
+\begin{document}
+\section{Introduction}
+Prior work, e.g. \citep[see][p.~3]{alpha, beta}, showed gains. Smith et al. \cite{gamma} agree.
+% A commented line with \cite{ghost} in it.
+We write $x = 1.5. Next$ and it holds \citet*{alpha}.
+\input{sections/body}
+\subsection{Deep}
+\include{sections/extra.tex}
+\begin{figure}
+\caption{A figure \cite{figkey}.}
+\end{figure}
+Outside caption \caption{Stray \cite{capkey}.} text continues \cite{delta}.
+Repeated \cite{alpha,alpha} here. Fixed \nocite{nokey}.
+\bibliography{refs}
+\end{document}
