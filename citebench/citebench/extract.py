@@ -523,11 +523,11 @@ def _files_in_root(root: Path, pattern: str, stats: Stats) -> list[Path]:
 
 
 def _find_main(root: Path, tex_files: list[Path]) -> Path:
-    cands, included = [], set()
+    cands, begin_only, included = [], [], set()
     for p in tex_files:
         work, _ = mask_comments(read_text(p))
-        if BEGIN_DOC_RE.search(work) and re.search(r"\\documentclass", work):
-            cands.append(p)
+        if BEGIN_DOC_RE.search(work):
+            (cands if re.search(r"\\documentclass", work) else begin_only).append(p)
         for m in INPUT_RE.finditer(work):
             for cand in (root / m.group(1).strip(), root / (m.group(1).strip() + ".tex")):
                 try:
@@ -535,6 +535,8 @@ def _find_main(root: Path, tex_files: list[Path]) -> Path:
                         included.add(cand.resolve())
                 except (OSError, ValueError):
                     pass
+    # \documentclass may sit in an \input'ed header file (e.g. ACM templates): fall back to \begin{document}
+    cands = cands or begin_only
     if not cands:
         raise FileNotFoundError(f"no main .tex file (\\documentclass + \\begin{{document}}) under {root}")
     free = [c for c in cands if c not in included] or cands

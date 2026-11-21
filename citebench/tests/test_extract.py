@@ -273,3 +273,14 @@ def test_duplicate_bib_key_consistent(tmp_path):
     r = units[0].reference
     assert r.title == "First" and r.year == 2001 and "First" in r.raw and "Second" not in r.raw
     assert stats.duplicate_bib_keys == ["k"]
+
+
+def test_main_file_with_documentclass_in_input_header(tmp_path):
+    from citebench.extract import extract
+    (tmp_path / "hdr.tex").write_text(r"\documentclass{article}" + "\n", encoding="utf-8")
+    (tmp_path / "main.tex").write_text(
+        "\n".join([r"\input{hdr}", r"\begin{document}", r"Transformers use attention \cite{v}.", r"\end{document}", ""]),
+        encoding="utf-8")
+    (tmp_path / "refs.bib").write_text("@article{v, title={Attention Is All You Need}, year={2017}}\n", encoding="utf-8")
+    units, _ = extract(tmp_path, "s")
+    assert [u.cite_key for u in units] == ["v"]
