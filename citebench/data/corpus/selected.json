@@ -1,0 +1,146 @@
+{
+ "selected": [
+  {
+   "arxiv_id": "2203.15935",
+   "title": "Graph Neural Networks in IoT: A Survey",
+   "first_author": "Guimin Dong",
+   "year": 2022,
+   "subfield": "GNN",
+   "license": "CC BY-NC-ND 4.0",
+   "ref_count": 344,
+   "venue": null,
+   "v1_date": "2022-03-29"
+  },
+  {
+   "arxiv_id": "2306.13549",
+   "title": "A Survey on Multimodal Large Language Models",
+   "first_author": "Shukang Yin",
+   "year": 2023,
+   "subfield": "Multimodal",
+   "license": "CC BY 4.0",
+   "ref_count": 251,
+   "venue": null,
+   "v1_date": "2023-06-23"
+  },
+  {
+   "arxiv_id": "2506.17518",
+   "title": "A Survey of State Representation Learning for Deep Reinforcement Learning",
+   "first_author": "Ayoub Echchahed",
+   "year": 2025,
+   "subfield": "RL",
+   "license": "CC BY 4.0",
+   "ref_count": 150,
+   "venue": null,
+   "v1_date": "2025-06-20"
+  },
+  {
+   "arxiv_id": "2212.09597",
+   "title": "Reasoning with Language Model Prompting: A Survey",
+   "first_author": "Shuofei Qiao",
+   "year": 2022,
+   "subfield": "LLM",
+   "license": "arXiv non-exclusive",
+   "ref_count": 218,
+   "venue": null,
+   "v1_date": "2022-12-19"
+  },
+  {
+   "arxiv_id": "2302.10637",
+   "title": "A Survey of Trustworthy Federated Learning with Perspectives on Security, Robustness, and Privacy",
+   "first_author": "Yifei Zhang",
+   "year": 2023,
+   "subfield": "Privacy/security",
+   "license": "arXiv non-exclusive",
+   "ref_count": 275,
+   "venue": null,
+   "v1_date": "2023-02-21"
+  },
+  {
+   "arxiv_id": "2605.17131",
+   "title": "A Survey on Deep Learning Architectures for Point Cloud Classification and Segmentation",
+   "first_author": "Minhas Kamal",
+   "year": 2026,
+   "subfield": "CV",
+   "license": "CC BY 4.0",
+   "ref_count": 135,
+   "venue": null,
+   "v1_date": "2026-05-16"
+  },
+  {
+   "arxiv_id": "2401.00625",
+   "title": "Beyond Efficiency: A Systematic Survey of Resource-Efficient Large Language Models",
+   "first_author": "Guangji Bai",
+   "year": 2024,
+   "subfield": "Efficient ML",
+   "license": "arXiv non-exclusive",
+   "ref_count": 245,
+   "venue": null,
+   "v1_date": "2024-01-01"
+  },
+  {
+   "arxiv_id": "2502.05151",
+   "title": "Transforming Science with Large Language Models: A Survey on AI-assisted Scientific Discovery, Experimentation, Content Generation, and Evaluation",
+   "first_author": "Steffen Eger",
+   "year": 2025,
+   "subfield": "AI for science",
+   "license": "CC BY 4.0",
+   "ref_count": 335,
+   "venue": null,
+   "v1_date": "2025-02-07"
+  },
+  {
+   "arxiv_id": "2209.00796",
+   "title": "Diffusion Models: A Comprehensive Survey of Methods and Applications",
+   "first_author": "Ling Yang",
+   "year": 2022,
+   "subfield": "Generative",
+   "license": "arXiv non-exclusive",
+   "ref_count": 394,
+   "venue": null,
+   "v1_date": "2022-09-02"
+  },
+  {
+   "arxiv_id": "2204.08570",
+   "title": "A Comprehensive Survey on Trustworthy Graph Neural Networks: Privacy, Robustness, Fairness, and Explainability",
+   "first_author": "Enyan Dai",
+   "year": 2022,
+   "subfield": "GNN",
+   "license": "arXiv non-exclusive",
+   "ref_count": 258,
+   "venue": null,
+   "v1_date": "2022-04-18"
+  }
+ ],
+ "exclusions": [
+  [
+   "2307.15838",
+   "ref_count_unverified"
+  ],
+  [
+   "2405.00314",
+   "ref_count_below_100"
+  ],
+  [
+   "2411.15296",
+   "ref_count_unverified"
+  ],
+  [
+   "2508.14111",
+   "ref_count_unverified"
+  ]
+ ],
+ "log": [
+  "pick 2203.15935 subfield=GNN order=1",
+  "pick 2306.13549 subfield=Multimodal order=2",
+  "pick 2506.17518 subfield=RL order=3",
+  "pick 2212.09597 subfield=LLM order=4",
+  "pick 2302.10637 subfield=Privacy/security order=5",
+  "pick 2605.17131 subfield=CV order=6",
+  "pick 2401.00625 subfield=Efficient ML order=7",
+  "pick 2502.05151 subfield=AI for science order=8",
+  "pick 2209.00796 subfield=Generative order=9",
+  "pick 2204.08570 subfield=GNN order=10"
+ ],
+ "seed": 20261122,
+ "timestamp": "2026-11-21T20:47:16+00:00"
+}

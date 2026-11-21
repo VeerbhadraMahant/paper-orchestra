@@ -32,3 +32,19 @@ Collected 2026-11-22. Titles, first authors and years come from the arXiv listin
 - 7 of 22 are CC BY 4.0. Releasing short citing sentences from non-CC-BY surveys may still be acceptable as short excerpts with attribution, but that is a judgement, not a verified legal position; preferring CC BY keeps the release simple.
 - CV and RL have one candidate each; the pool needs more there before a stratified draw.
 - 2303.18223 was used as the extractor smoke test (21 files, 946 citing sentences, 2150 units, 3 keys missing from the bibliography).
+
+## Top-up and verification (2026-11-22)
+
+D7 top-up search for CV and RL, done by a lookup agent; the search itself was not systematic (no fixed query log), which is a limitation of the pool. Seven surveys added. Titles, first authors and v1 dates confirmed against the arXiv export API; licences from arXiv abs pages; reference counts from the Semantic Scholar Graph API; TeX source confirmed by listing the e-print archive (not extracted).
+
+| arXiv id | Title | First author | v1 | Subfield | License | Refs (S2) |
+|---|---|---|---|---|---|---|
+| 2605.17131 | A Survey on Deep Learning Architectures for Point Cloud Classification and Segmentation | Minhas Kamal | 2026-05-16 | CV | CC BY 4.0 | 135 |
+| 2605.06714 | Edge Deep Learning in Computer Vision and Medical Diagnostics: A Comprehensive Survey | Yiwen Xu | 2026-05-07 | CV | CC BY 4.0 | 130 |
+| 2606.27745 | Panoramic Scene Understanding: A Survey from Distortion-Aware Engineering to Sphere-Native Modeling | Qinfeng Zhu | 2026-06-26 | CV | arXiv non-exclusive | 136 |
+| 2506.17518 | A Survey of State Representation Learning for Deep Reinforcement Learning | Ayoub Echchahed | 2025-06-20 | RL | CC BY 4.0 | 150 |
+| 2505.17342 | A Survey of Safe Reinforcement Learning and Constrained MDPs | Ankita Kushwaha | 2025-05-22 | RL | CC BY 4.0 | 120 |
+| 2506.21872 | A Survey of Continual Reinforcement Learning | Chaofan Pan | 2025-06-27 | RL | arXiv non-exclusive | 246 |
+| 2604.17312 | A Survey of Reinforcement Learning for Large Language Models under Data Scarcity | Zhiyin Yu | 2026-04-19 | LLM (RL applied to LLMs, grouped with 2412.10400) | arXiv non-exclusive | 129 |
+
+Verification of the original pool: v1 dates for all 22 confirmed in range (arXiv API). Thirteen S2 counts re-fetched and all matched the table above, except 2307.15838 and 2411.15296, for which S2 returned 0; with 2508.14111 (not re-fetchable under rate limits) these three stay `ref_count_unverified` and are ineligible under D2. The draw (seed 20261122, D7a) is in `data/corpus/selected.json`.
