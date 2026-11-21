@@ -181,8 +181,15 @@ def test_cli_end_to_end(tmp_path, capsys):
     _write(gold, [{"unit_id": f"u{i}", "annotator_id": "A1", "support": s}
                   for i, s in enumerate([S, S, N, N])])
     _write(pred, [
+        # src: u0 right, u1 errored then retried (last row wins), u2 right, u3 absent (missing, D27)
         {"unit_id": "u0", "judge": "j1", "condition": "src", "support": S, "confidence": 3},
         {"unit_id": "u1", "judge": "j1", "condition": "src", "support": None},
+        {"unit_id": "u1", "judge": "j1", "condition": "src", "support": S},
+        {"unit_id": "u2", "judge": "j1", "condition": "src", "support": N},
+        {"unit_id": "u2", "judge": "j1", "condition": "src", "run_index": 1, "support": S},  # repeat: not scored
+        # nosrc: all four answered, one wrong
+        {"unit_id": "u0", "judge": "j1", "condition": "nosrc", "support": N},
+        {"unit_id": "u1", "judge": "j1", "condition": "nosrc", "support": S},
         {"unit_id": "u2", "judge": "j1", "condition": "nosrc", "support": N},
         {"unit_id": "u3", "judge": "j1", "condition": "nosrc", "support": N},
         {"unit_id": "zz", "judge": "j1", "condition": "src", "support": S},
@@ -190,13 +197,14 @@ def test_cli_end_to_end(tmp_path, capsys):
     assert ev.main(["--gold", str(gold), "--pred", str(pred), "--n-boot", "50"]) == 0
     out = capsys.readouterr().out
     assert "judge=j1" in out and "condition=" not in out
-    assert "n=4 missing=1" in out and "accuracy=0.750" in out and "accuracy=1.000" in out
+    assert "n=8 missing=1" in out
     assert "not_supported=" in out and "1 prediction rows" in out
 
     assert ev.main(["--gold", str(gold), "--pred", str(pred), "--by", "condition", "--n-boot", "50"]) == 0
     out2 = capsys.readouterr().out
     assert "condition=src" in out2 and "condition=nosrc" in out2
-    assert "n=2 missing=1" in out2
+    assert "n=4 missing=1" in out2 and "n=4 missing=0" in out2
+    assert "accuracy=0.750" in out2
     # deterministic
     ev.main(["--gold", str(gold), "--pred", str(pred), "--by", "condition", "--n-boot", "50"])
     assert capsys.readouterr().out == out2

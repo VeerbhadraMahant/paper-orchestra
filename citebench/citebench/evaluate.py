@@ -328,21 +328,31 @@ def _summarize(golds, preds, n_boot, seed):
 
 def evaluate_files(gold_path, pred_path, by=None, n_boot=10000, seed=0):
     """Returns ({(judge, condition-or-None): summary}, count of pred rows whose
-    unit_id is not in gold). Predictions are joined to gold on unit_id; rows are
-    used as given (a unit under several conditions is one row per condition)."""
+    unit_id is not in gold). Predictions are joined to gold on unit_id. The judge
+    output file is append-only, so the last row per (judge, condition, unit_id)
+    wins, and only run_index 0 is scored (D28: repeats measure variation only).
+    A gold unit with no row for a (judge, condition) that appears in the file is
+    scored as a missing prediction (D27)."""
     gold = {}
     for r in _read_jsonl(gold_path):
         if r["unit_id"] in gold:
             raise ValueError(f"duplicate gold unit_id {r['unit_id']}")
         gold[r["unit_id"]] = r["support"]
-    groups, unknown = defaultdict(lambda: ([], [])), 0
+    latest, unknown = {}, 0
     for r in _read_jsonl(pred_path):
         if r["unit_id"] not in gold:
             unknown += 1
             continue
-        key = (r.get("judge", "?"), r.get("condition") if by == "condition" else None)
-        groups[key][0].append(gold[r["unit_id"]])
-        groups[key][1].append(r.get("support"))
+        if r.get("run_index", 0) != 0:
+            continue
+        latest[(r.get("judge", "?"), r.get("condition"), r["unit_id"])] = r.get("support")
+    pairs = {(j, c) for j, c, _ in latest}
+    groups = defaultdict(lambda: ([], []))
+    for j, c in sorted(pairs, key=str):
+        key = (j, c if by == "condition" else None)
+        for uid in sorted(gold):
+            groups[key][0].append(gold[uid])
+            groups[key][1].append(latest.get((j, c, uid)))
     ordered = sorted(groups.items(), key=lambda kv: str(kv[0]))
     return {k: _summarize(g, p, n_boot, seed) for k, (g, p) in ordered}, unknown
 
