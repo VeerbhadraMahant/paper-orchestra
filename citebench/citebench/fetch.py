@@ -1,0 +1,332 @@
+"""Find the best freely available text (full text, else abstract) for each cited reference.
+
+Free sources only, no keys, no contact details: arXiv, Semantic Scholar (unauthenticated), OpenAlex.
+Every HTTP response is cached on disk, so a rerun makes no network calls.
+
+Usage: python -m citebench.fetch units.jsonl --out sources.jsonl --cache .cache/citebench
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import time
+import xml.etree.ElementTree as ET
+from collections import Counter
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterator, Optional
+from urllib.parse import quote, urlparse
+
+import requests
+from thefuzz import fuzz
+
+from .units import Reference, SourceRecord, Unit, read_jsonl
+
+HEADERS = {"User-Agent": "citebench/0.0.1 (research benchmark)"}
+TIMEOUT = 20
+MAX_RETRIES = 3
+MAX_PDF_BYTES = 40 * 1024 * 1024
+MIN_TEXT_CHARS = 2000
+# minimum seconds between requests, per rate-limit group
+MIN_INTERVAL = {"semanticscholar": 1.1, "arxiv": 3.0}
+S2 = "https://api.semanticscholar.org/graph/v1"
+S2_FIELDS = "title,abstract,year,externalIds,openAccessPdf"
+OPENALEX = "https://api.openalex.org/works"
+ATOM = "{http://www.w3.org/2005/Atom}"
+
+
+class FetchError(Exception):
+    """Failure with a short machine-readable reason as its message."""
+
+
+@dataclass
+class Cand:
+    name: str
+    url: str
+    title: Optional[str]
+    abstract: Optional[str]
+    pdf_url: Optional[str] = None
+
+
+def norm_title(t: Optional[str]) -> str:
+    return re.sub(r"[\W_]+", " ", (t or "").replace("{", "").replace("}", "").casefold()).strip()
+
+
+def clean_doi(doi: str) -> str:
+    return re.sub(r"^(https?://(dx\.)?doi\.org/|doi:)", "", doi.strip(), flags=re.I)
+
+
+def rebuild_abstract(inv: Optional[dict]) -> Optional[str]:
+    """OpenAlex stores abstracts as {word: [positions]}; put the words back in order."""
+    if not inv:
+        return None
+    words = {pos: w for w, positions in inv.items() for pos in positions}
+    return " ".join(words[i] for i in sorted(words))
+
+
+def _group(url: str) -> Optional[str]:
+    host = urlparse(url).netloc
+    return next((g for g in MIN_INTERVAL if g in host), None)
+
+
+class Fetcher:
+    def __init__(self, cache: str | Path, session=None, sleep=time.sleep, clock=time.monotonic,
+                 min_match: float = 90):
+        self.min_match = min_match
+        self.cache = Path(cache)
+        self.session = session or requests.Session()
+        self.sleep, self.clock = sleep, clock
+        self._last: dict[str, float] = {}
+
+    # ---- HTTP with retry, throttle, disk cache ----
+
+    def _throttle(self, url: str) -> None:
+        g = _group(url)
+        if g is None:
+            return
+        wait = MIN_INTERVAL[g] - (self.clock() - self._last.get(g, float("-inf")))
+        if wait > 0:
+            self.sleep(wait)
+        self._last[g] = self.clock()
+
+    def _get(self, url: str):
+        """GET with retry on 429/5xx/network errors; returns the first other response."""
+        r = None
+        for attempt in range(MAX_RETRIES + 1):
+            self._throttle(url)
+            try:
+                r = self.session.get(url, timeout=TIMEOUT, headers=HEADERS)
+            except requests.RequestException:
+                r = None
+            if r is not None and r.status_code != 429 and r.status_code < 500:
+                return r
+            if attempt < MAX_RETRIES:
+                ra = (r.headers.get("Retry-After") or "") if r is not None else ""
+                # Retry-After as an HTTP date is ignored; exponential backoff is used instead
+                self.sleep(min(float(ra), 60.0) if re.fullmatch(r"\d+(\.\d+)?", ra) else 2.0**attempt)
+        raise FetchError(f"http_{r.status_code}" if r is not None else "network_error")
+
+    def _body(self, url: str) -> Optional[str]:
+        """Response text of a cached GET; None on 404; FetchError on other non-200 statuses."""
+        p = self.cache / "http" / (hashlib.sha1(url.encode()).hexdigest() + ".json")
+        if p.exists():
+            d = json.loads(p.read_text(encoding="utf-8"))
+        else:
+            r = self._get(url)
+            d = {"url": url, "status": r.status_code, "body": r.text}
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(d), encoding="utf-8")
+        if d["status"] == 404:
+            return None
+        if d["status"] != 200:
+            raise FetchError(f"http_{d['status']}")
+        return d["body"]
+
+    def _json(self, url: str):
+        body = self._body(url)
+        if body is None:
+            return None
+        try:
+            return json.loads(body)
+        except ValueError:
+            raise FetchError("bad_json")
+
+    # ---- text storage ----
+
+    def _store(self, text: str) -> str:
+        sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        p = self.cache / "texts" / f"{sha}.txt"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+        return sha
+
+    def _pdf_sha(self, url: str) -> str:
+        """Download a PDF, store its extracted text, return the text sha256. Outcomes are cached by URL."""
+        p = self.cache / "pdf" / (hashlib.sha1(url.encode()).hexdigest() + ".json")
+        if p.exists():
+            d = json.loads(p.read_text(encoding="utf-8"))
+            if d.get("error"):
+                raise FetchError(d["error"])
+            return d["sha256"]
+        try:
+            sha = self._extract_pdf(url)
+        except FetchError as e:
+            if not re.match(r"http_(429|5)|network_error", str(e)):  # transient failures are retried next run
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(json.dumps({"url": url, "error": str(e)}), encoding="utf-8")
+            raise
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"url": url, "sha256": sha}), encoding="utf-8")
+        return sha
+
+    def _extract_pdf(self, url: str) -> str:
+        import pymupdf
+
+        r = self._get(url)
+        if r.status_code != 200:
+            raise FetchError(f"http_{r.status_code}")
+        data = r.content  # shortcut: whole body is read before the size check; fine for a 40 MB cap
+        if len(data) > MAX_PDF_BYTES:
+            raise FetchError("pdf_too_large")
+        if not data.startswith(b"%PDF"):
+            raise FetchError("not_pdf")
+        try:
+            with pymupdf.open(stream=data, filetype="pdf") as doc:
+                text = "\n".join(page.get_text() for page in doc)
+        except Exception:
+            raise FetchError("pdf_unreadable")
+        if len(text.strip()) < MIN_TEXT_CHARS:
+            raise FetchError("pdf_too_short")
+        return self._store(text)
+
+    # ---- sources: each returns a Cand, None if not found, or raises FetchError ----
+
+    def _arxiv(self, arxiv_id: str) -> Optional[Cand]:
+        aid = re.sub(r"^arxiv:", "", arxiv_id.strip(), flags=re.I)
+        body = self._body(f"http://export.arxiv.org/api/query?id_list={quote(aid)}")
+        if body is None:
+            return None
+        try:
+            entry = ET.fromstring(body).find(ATOM + "entry")
+        except ET.ParseError:
+            raise FetchError("bad_xml")
+        if entry is None or "api/errors" in (entry.findtext(ATOM + "id") or ""):
+            return None
+        t, s = (" ".join((entry.findtext(ATOM + k) or "").split()) or None for k in ("title", "summary"))
+        return Cand("arxiv", f"https://arxiv.org/abs/{aid}", t, s, f"https://arxiv.org/pdf/{aid}")
+
+    def _s2(self, ref: Reference) -> Optional[Cand]:
+        lookups = []
+        if ref.doi:
+            lookups.append((f"{S2}/paper/DOI:{quote(clean_doi(ref.doi), safe='/:()')}?fields={S2_FIELDS}", False))
+        if ref.title:
+            lookups.append((f"{S2}/paper/search/match?query={quote(ref.title)}&fields={S2_FIELDS}", True))
+        for url, wrapped in lookups:
+            d = self._json(url)
+            paper = ((d or {}).get("data") or [None])[0] if wrapped else d
+            if not paper:
+                continue
+            arx = (paper.get("externalIds") or {}).get("ArXiv")
+            oa = (paper.get("openAccessPdf") or {}).get("url")
+            pdf = f"https://arxiv.org/pdf/{arx}" if arx else oa
+            return Cand("semantic_scholar", f"https://www.semanticscholar.org/paper/{paper.get('paperId', '')}",
+                        paper.get("title"), paper.get("abstract"), pdf)
+        return None
+
+    def _openalex(self, ref: Reference) -> Optional[Cand]:
+        if ref.doi:
+            url = f"{OPENALEX}?filter=doi:{quote(clean_doi(ref.doi), safe='/:()')}"
+        elif ref.title:
+            url = f"{OPENALEX}?search={quote(ref.title)}&per-page=1"
+        else:
+            return None
+        d = self._json(url)
+        w = ((d or {}).get("results") or [None])[0]
+        if not w:
+            return None
+        pdf = (w.get("best_oa_location") or {}).get("pdf_url")
+        oa = (w.get("open_access") or {}).get("oa_url")
+        if not pdf and oa and re.search(r"\.pdf($|\?)|/pdf", oa):
+            pdf = oa
+        return Cand("openalex", w.get("id") or url, w.get("title") or w.get("display_name"),
+                    rebuild_abstract(w.get("abstract_inverted_index")), pdf)
+
+    def _candidates(self, ref: Reference, errors: list[str]) -> Iterator[Cand]:
+        stages = []
+        if ref.arxiv_id:
+            stages.append(lambda: self._arxiv(ref.arxiv_id))
+        stages += [lambda: self._s2(ref), lambda: self._openalex(ref)]
+        for stage in stages:
+            try:
+                c = stage()
+            except FetchError as e:
+                errors.append(str(e))
+                continue
+            if c:
+                yield c
+
+    # ---- one reference ----
+
+    def fetch_reference(self, survey_id: str, key: str, ref: Optional[Reference]) -> SourceRecord:
+        def rec(level: str, **kw) -> SourceRecord:
+            return SourceRecord(cite_key=key, survey_id=survey_id, access_level=level,
+                                retrieved_at=datetime.now(timezone.utc).isoformat(), **kw)
+
+        if ref is None:
+            return rec("none", error="missing_bib_entry")
+        if not (ref.title or ref.arxiv_id or ref.doi):
+            return rec("none", error="no_identifier")
+        errors: list[str] = []
+        worst: Optional[tuple[float, str]] = None  # best-scoring rejected candidate
+        for c in self._candidates(ref, errors):
+            score = fuzz.token_sort_ratio(norm_title(ref.title), norm_title(c.title)) if ref.title else None
+            if score is not None and score < self.min_match:
+                worst = max(worst or (-1.0, ""), (float(score), c.title or ""))
+                continue
+            meta = dict(matched_title=c.title, match_score=score)
+            why = None
+            if c.pdf_url:
+                try:
+                    sha = self._pdf_sha(c.pdf_url)
+                    name = "arxiv" if "arxiv.org/" in c.pdf_url else c.name
+                    return rec("full_text", source_name=name, source_url=c.pdf_url, text_sha256=sha,
+                               text_path=f"texts/{sha}.txt", **meta)
+                except FetchError as e:
+                    why = f"full_text_failed:{e}"
+            if c.abstract:
+                sha = self._store(c.abstract)
+                return rec("abstract", source_name=c.name, source_url=c.url, text_sha256=sha,
+                           text_path=f"texts/{sha}.txt", error=why, **meta)
+            return rec("none", source_name=c.name, source_url=c.url, error=why or "no_text_available", **meta)
+        if worst:
+            return rec("none", matched_title=worst[1], match_score=worst[0], error="low_title_match")
+        return rec("none", error="; ".join(sorted(set(errors))) or "not_found")
+
+
+# ---- batch run ----
+
+def run(units_path: str | Path, out: str | Path, fetcher: Fetcher, max_refs: Optional[int] = None) -> list[SourceRecord]:
+    """Fetch every distinct (survey_id, cite_key) not already in `out`; append records as they finish."""
+    refs: dict[tuple[str, str], Optional[Reference]] = {}
+    for u in read_jsonl(units_path, Unit):
+        k = (u.survey_id, u.cite_key)
+        refs[k] = refs.get(k) or u.reference
+    keys = list(refs)[:max_refs]
+    out = Path(out)
+    done = {(r.survey_id, r.cite_key): r for r in read_jsonl(out, SourceRecord)} if out.exists() else {}
+    result = [done[k] for k in keys if k in done]
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "a", encoding="utf-8", newline="\n") as f:
+        for sid, key in (k for k in keys if k not in done):
+            try:
+                r = fetcher.fetch_reference(sid, key, refs[(sid, key)])
+            except Exception as e:  # one bad reference must not stop the run
+                r = SourceRecord(cite_key=key, survey_id=sid, access_level="none", error=f"internal:{type(e).__name__}")
+            f.write(json.dumps(asdict(r), ensure_ascii=False) + "\n")
+            f.flush()
+            result.append(r)
+    return result
+
+
+def main(argv=None) -> None:
+    ap = argparse.ArgumentParser(prog="python -m citebench.fetch")
+    ap.add_argument("units")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--cache", default=".cache/citebench")
+    ap.add_argument("--min-match", type=float, default=90)
+    ap.add_argument("--max-refs", type=int)
+    a = ap.parse_args(argv)
+    f = Fetcher(a.cache, min_match=a.min_match)
+    recs = run(a.units, a.out, f, a.max_refs)
+    levels = Counter(r.access_level for r in recs)
+    print(f"references={len(recs)} full_text={levels['full_text']} abstract={levels['abstract']} none={levels['none']}")
+    for err, n in Counter(r.error for r in recs if r.error).most_common():
+        print(f"  error {err}: {n}")
+
+
+if __name__ == "__main__":
+    main()
