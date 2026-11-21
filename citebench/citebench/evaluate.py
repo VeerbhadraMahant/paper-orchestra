@@ -168,13 +168,17 @@ def cluster_bootstrap_ci(stat_fn, clusters, *arrays, n=10000, seed=0, alpha=0.05
 
 # 4. Calibration (D21) --------------------------------------------------------
 
-def ece_by_level(confidences, correct, levels=(1, 2, 3), level_probs=DEFAULT_LEVEL_PROBS):
+def ece_by_level(confidences, correct, levels=(1, 2, 3), level_probs=DEFAULT_LEVEL_PROBS, missing="wrong"):
     """Expected calibration error with one bin per confidence level, weighted
     by bin size: sum_b (n_b / N) * |accuracy_b - level_probs[b]|. The nominal
-    probability per level is a convention (see DEFAULT_LEVEL_PROBS). Items with
-    a missing confidence or missing correctness (None) are skipped. Returns nan
-    if nothing remains."""
-    items = [(c, bool(k)) for c, k in zip(confidences, correct) if c is not None and k is not None]
+    probability per level is a convention (see DEFAULT_LEVEL_PROBS). An item
+    needs a confidence. Missing correctness (None, no prediction) counts as
+    incorrect under missing="wrong" (default) and is skipped under "exclude".
+    Items with confidence None are always skipped. Returns nan if nothing
+    remains."""
+    _check_missing(missing)
+    items = [(c, bool(k)) for c, k in zip(confidences, correct)
+             if c is not None and (k is not None or missing == "wrong")]
     if not items:
         return float("nan")
     total = 0.0
@@ -332,7 +336,8 @@ def evaluate_files(gold_path, pred_path, by=None, n_boot=10000, seed=0):
     output file is append-only, so the last row per (judge, condition, unit_id)
     wins, and only run_index 0 is scored (D28: repeats measure variation only).
     A gold unit with no row for a (judge, condition) that appears in the file is
-    scored as a missing prediction (D27)."""
+    scored as a missing prediction (D27). With by=None, a judge whose rows span
+    several conditions raises ValueError (pooling would duplicate gold units)."""
     gold = {}
     for r in _read_jsonl(gold_path):
         if r["unit_id"] in gold:
@@ -347,6 +352,12 @@ def evaluate_files(gold_path, pred_path, by=None, n_boot=10000, seed=0):
             continue
         latest[(r.get("judge", "?"), r.get("condition"), r["unit_id"])] = r.get("support")
     pairs = {(j, c) for j, c, _ in latest}
+    if by is None:
+        conds = defaultdict(set)
+        for j, c in pairs:
+            conds[j].add(c)
+        if any(len(v) > 1 for v in conds.values()):
+            raise ValueError("predictions span several conditions; use --by condition")
     groups = defaultdict(lambda: ([], []))
     for j, c in sorted(pairs, key=str):
         key = (j, c if by == "condition" else None)

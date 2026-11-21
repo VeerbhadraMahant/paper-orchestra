@@ -87,7 +87,12 @@ def test_ece_and_brier():
     correct = [True, True, True, False, True, False]
     # level 3: acc 0.75 vs 0.95 -> 0.2 weighted 4/6; level 1: acc 0.5 vs 0.5 -> 0
     assert ev.ece_by_level(conf, correct) == pytest.approx(0.2 * 4 / 6)
-    assert ev.ece_by_level([3, None], [True, None]) == pytest.approx(0.05)
+    assert ev.ece_by_level([3, None], [True, None], missing="exclude") == pytest.approx(0.05)
+    # missing correctness counts as wrong by default: bin 3 has acc 0.5
+    assert ev.ece_by_level([3, 3], [True, None]) == pytest.approx(0.45)
+    assert ev.ece_by_level([3, None], [True, None]) == pytest.approx(0.05)  # no confidence: skipped
+    with pytest.raises(ValueError):
+        ev.ece_by_level([3], [True], missing="x")
     assert math.isnan(ev.ece_by_level([None], [None]))
     probs = ev.prob_supported([3, 1, 2], [S, N, None])
     assert probs == [0.95, 0.5, None]
@@ -194,10 +199,15 @@ def test_cli_end_to_end(tmp_path, capsys):
         {"unit_id": "u3", "judge": "j1", "condition": "nosrc", "support": N},
         {"unit_id": "zz", "judge": "j1", "condition": "src", "support": S},
     ])
-    assert ev.main(["--gold", str(gold), "--pred", str(pred), "--n-boot", "50"]) == 0
+    with pytest.raises(ValueError, match="use --by condition"):
+        ev.main(["--gold", str(gold), "--pred", str(pred), "--n-boot", "50"])
+    single = tmp_path / "single.jsonl"
+    _write(single, [r for r in map(json.loads, pred.read_text().splitlines())
+                    if r.get("condition") in ("src", None) or r["unit_id"] == "zz"])
+    assert ev.main(["--gold", str(gold), "--pred", str(single), "--n-boot", "50"]) == 0
     out = capsys.readouterr().out
     assert "judge=j1" in out and "condition=" not in out
-    assert "n=8 missing=1" in out
+    assert "n=4 missing=1" in out
     assert "not_supported=" in out and "1 prediction rows" in out
 
     assert ev.main(["--gold", str(gold), "--pred", str(pred), "--by", "condition", "--n-boot", "50"]) == 0
