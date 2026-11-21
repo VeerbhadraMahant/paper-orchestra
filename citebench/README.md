@@ -5,7 +5,17 @@ Benchmark and study of citation claim-support checking. See `DESIGN.md` for the 
 ## Layout
 
 - `citebench/units.py`: shared data contract (Unit, Reference, SourceRecord) and JSONL I/O.
-- `tests/`: pytest suite. Network calls are mocked; tests never hit the internet.
+- `citebench/extract.py`: arXiv LaTeX source (.tex + .bib/.bbl) to citing-sentence units.
+- `citebench/fetch.py`: free source text per cited reference (arXiv, Semantic Scholar, OpenAlex), cached and resumable. No API keys, no contact details sent.
+- `tests/`: pytest suite. Network calls are stubbed; tests never hit the internet.
+- Docs: `DESIGN.md` (plan), `PROTOCOL.md` (pre-registered protocol), `DECISIONS.md` (resolved open items), `ANNOTATION_GUIDELINES.md`, `CORPUS_CANDIDATES.md`, `SMOKE.md` (real-data checks).
+
+## Usage
+
+```
+python -m citebench.extract <arxiv_source_dir> --survey-id <arxiv_id> --out units.jsonl
+python -m citebench.fetch units.jsonl --out sources.jsonl --cache .cache/citebench
+```
 
 ## Run tests
 
