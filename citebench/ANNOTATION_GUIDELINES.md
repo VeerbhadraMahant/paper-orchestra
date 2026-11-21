@@ -55,11 +55,13 @@ Judge the claim attributed to this cited work against the source text.
 
 Rule of thumb for 5 versus 6: if you can name the part that is supported and quote it, it is `partially_supported`. If you cannot quote anything relevant, it is `not_supported`.
 
+Key numbers (G5). If a number that is central to the sentence differs from the source beyond rounding (section 7), the label is at most `partially_supported`, with strength `overstated` and type `number_changed` when the sentence is stronger. Do not use `supported` in this case, even when the direction of the claim is right. If the numbers cannot be reconciled at all, see `contradicted`.
+
 Rule of thumb for 4 versus 5 when the source says less than the sentence: if the only difference is a hedge, a scope limit, or the strength of wording (the source finds the same effect but more cautiously), label `supported` and record the difference in the strength label. Use `partially_supported` only when a separate piece of content is missing.
 
 ## 4. Strength label
 
-Fill this only when the support label is `supported` or `partially_supported`. For `not_supported`, `contradicted` and `cannot_check`, set `strength` to `null` and `overstatement_types` to `[]`. `[TO CONFIRM: whether strength should also be recorded for contradicted units]`
+Fill this only when the support label is `supported` or `partially_supported`. For `not_supported`, `contradicted` and `cannot_check`, set `strength` to `null` and `overstatement_types` to `[]`. Strength is not recorded for `contradicted` units (G1).
 
 Compare how strongly the sentence puts the claim with how strongly the source puts it.
 
@@ -146,9 +148,9 @@ If two roles seem to fit, choose the one a reader would use the citation for, an
   - `not_supported` is not available at this access level.
   - `partially_supported` is available only when the abstract itself shows that the claim holds in part.
   - Write "abstract only" in `notes`.
-- `none`: `cannot_check`, `strength` null.
+- `none`: `cannot_check`, `strength` null. Such units are logged and counted separately and are not annotated in the main set (PROTOCOL section 3, D10).
 
-`[TO CONFIRM: whether abstract-only units labeled supported are kept in the main set or used only in the RQ4 comparison]`
+Abstract-only units labeled `supported` stay in the main set, flagged by access level. The RQ4 comparison (E3) uses only units with full text (G2).
 
 ## 9. Record format
 
@@ -184,7 +186,7 @@ One JSON object per unit, one per line (JSONL).
 | `notes` | Free text. Required for `other`, `cannot_check`, `not_supported`, and any case flagged in section 7. Otherwise optional; use an empty string if there is nothing to add. |
 | `labeled_at` | ISO 8601 UTC timestamp, written when the label is saved. |
 
-Span offsets for the release (DESIGN section 4.6) are computed by script from the copied span text. Do not count characters by hand. `[TO CONFIRM: what the script does when a span is not found verbatim in the cached text, for example flag the unit for re-entry]`
+Span offsets for the release (DESIGN section 4.6) are computed by script from the copied span text. Do not count characters by hand. The script tries an exact match first; otherwise a fuzzy match (partial ratio at least 90); if neither succeeds, the offset is null and the unit is flagged for review (G3).
 
 ## 10. Illustrative examples
 
@@ -212,7 +214,7 @@ Sentence: "Method E improves accuracy on small datasets [CITE]." Source (invente
 Sentence: "Larger models cause better reasoning in language models [CITE]." Source (invented): "Across the five small models we trained, reasoning score correlates with parameter count." Label: `supported` (the core relation between size and reasoning is in the source), strength `overstated`, types `[scope_widened, causal_from_correlational]`. Span: the source sentence. Note: "five small models; correlation only".
 
 **Ex. 8: number_changed.**
-Sentence: "Method F cuts error by 40% [CITE]." Source (invented): "Method F reduces error from 10.0% to 8.0%, a 20% relative reduction." Label: `supported` for the direction, strength `overstated`, `[number_changed]`. Note: "40% vs 20%". If the sentence had said "10%", the strength would be `understated`.
+Sentence: "Method F cuts error by 40% [CITE]." Source (invented): "Method F reduces error from 10.0% to 8.0%, a 20% relative reduction." Label: `partially_supported` (the direction of the effect is supported, the key number is not), strength `overstated`, `[number_changed]`. Note: "40% vs 20%". The key number differs beyond rounding, so the label is capped at `partially_supported` (section 3, G5). If the sentence had said "10%", the same cap would apply and the strength would be `understated`.
 
 **Ex. 9: certainty_inflated with hedge_dropped.**
 Sentence: "The GammaSet paper proves that data augmentation prevents overfitting [CITE]." Source (invented): "Our preliminary results suggest that augmentation reduces overfitting in this setup." Label: `supported`, `overstated`, `[certainty_inflated, hedge_dropped, scope_widened]`. Span: the source sentence.
@@ -234,7 +236,7 @@ Sentence: "For a full treatment of calibration, see [CITE]." The invented source
 4. Log each change in the table below: version, date, reason.
 5. Freeze the guidelines (version 1.0) before the first test unit is labeled. After that, changes are deviations and go in the PROTOCOL.md deviation log.
 
-If a second annotator joins the pilot, they read these guidelines and label the same 30 dev units independently; compare, discuss disagreements, and revise. `[TO CONFIRM: whether the pilot uses two annotators, as in DESIGN section 8, or the author alone, as in DESIGN section 4.4]`
+If a second annotator joins the pilot, they read these guidelines and label the same 30 dev units independently; compare, discuss disagreements, and revise. The author labels the 30 dev units; the second annotator labels the same 30 independently only if available (G4).
 
 | Version | Date | Change | Reason |
 |---|---|---|---|
