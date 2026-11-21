@@ -95,7 +95,8 @@ def row(**kw):
     (dict(evidence_spans=""), "evidence_spans required"),
     (dict(support="not_supported", strength="", evidence_spans="", notes=""), "notes required"),
     (dict(access_level="abstract", support="not_supported", strength="", evidence_spans="", notes="n"), "abstract"),
-    (dict(evidence_spans="a || b || c || d || e"), "at most 4"),
+    (dict(evidence_spans="a\nb\nc\nd\ne"), "at most 4"),
+    (dict(time_spent_sec="١٢"), "integer"),
     (dict(time_spent_sec="x"), "integer"),
 ])
 def test_validate_rules(kw, frag):
@@ -146,7 +147,7 @@ def test_ingest_roundtrip(env):
     u = units[0]
     fill(sheet, u.unit_id, support="supported", strength="overstated", overstatement_types="hedge_dropped",
          citation_role="evidence", confidence="3", time_spent_sec="60",
-         evidence_spans="Method E may improve accuracy || not in the text at all zzz")
+         evidence_spans="Method E may improve accuracy\nnot in the text at all zzz")
     res = A.ingest(sheet, tmp / "U.jsonl", tmp / "S.jsonl", tmp / "cache", tmp / "labels.jsonl")
     assert res["labels"] == 1 and res["span_not_found"] == [u.unit_id]
     rec = json.loads((tmp / "labels.jsonl").read_text())
@@ -181,3 +182,21 @@ def test_reliability_pairing(tmp_path):
     assert res["counts"]["support"]["a"] == {"supported": 2, "not_supported": 1}
     pairs = json.loads((tmp_path / "pairs.json").read_text())
     assert pairs["unit_ids"] == ["1", "2", "3"] and pairs["strength"]["a"] == ["matches", "overstated", "None"]
+
+
+def test_spans_newline_only():
+    assert A.validate_row(row(evidence_spans="a || b")) == []  # one span now: " || " is not a separator
+    assert A._spans("a\r\n b \n\nc") == ["a", "b", "c"]
+
+
+def test_validate_rejects_duplicate_unit_ids(env):
+    tmp, units = env
+    sheet = do_export(tmp) / "sheet.csv"
+    rows = A.read_sheet(sheet)
+    rows.append(dict(rows[0]))
+    with open(sheet, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=A.COLUMNS)
+        w.writeheader()
+        w.writerows(rows)
+    errs, _ = A.validate(sheet, tmp / "U.jsonl")
+    assert any("duplicate" in m for m in errs[rows[0]["unit_id"]])

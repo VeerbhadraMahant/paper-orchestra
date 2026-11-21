@@ -23,7 +23,7 @@ STRENGTH = ("matches", "overstated", "understated")
 OVER_TYPES = ("hedge_dropped", "scope_widened", "causal_from_correlational", "number_changed",
               "certainty_inflated", "other")
 ROLES = ("evidence", "method", "dataset_or_tool", "context_or_background", "attribution_of_idea", "contrast")
-SPAN_SEP = " || "
+# One evidence span per line inside the CSV cell (Excel: Alt+Enter).
 CONTEXT_COLS = ["unit_id", "survey_id", "section", "sentence_text", "cite_key", "cocited_keys",
                 "reference_title", "reference_year", "access_level", "source_file"]
 LABEL_COLS = ["annotator_id", "support", "strength", "overstatement_types", "citation_role",
@@ -37,6 +37,7 @@ HEADER = """> Decision procedure (guidelines section 3, ask in order, stop at th
 > 4. Whole claim supported: supported.  5. Part supported: partially_supported.  6. Otherwise: not_supported.
 > Key number differs beyond rounding (G5): at most partially_supported, overstated, number_changed.
 > Strength is recorded only for supported and partially_supported (G1).
+> Evidence spans: one span per line inside the cell (Excel: Alt+Enter), at most 4.
 """
 
 
@@ -100,6 +101,10 @@ def _split(cell: str, sep: str) -> list[str]:
     return [p.strip() for p in cell.split(sep) if p.strip()]
 
 
+def _spans(cell: str) -> list[str]:
+    return [p.strip() for p in cell.splitlines() if p.strip()]
+
+
 def read_sheet(path) -> list[dict]:
     with open(path, encoding="utf-8-sig", newline="") as f:
         return list(csv.DictReader(f))
@@ -109,7 +114,7 @@ def validate_row(r: dict) -> list[str]:
     e: list[str] = []
     sup, stre = r.get("support", "").strip(), r.get("strength", "").strip()
     types = _split(r.get("overstatement_types", ""), ";")
-    spans = _split(r.get("evidence_spans", ""), SPAN_SEP.strip())
+    spans = _spans(r.get("evidence_spans", ""))
     notes = r.get("notes", "").strip()
     access = r.get("access_level", "").strip()
     if sup not in SUPPORT:
@@ -135,7 +140,7 @@ def validate_row(r: dict) -> list[str]:
     if r.get("confidence", "").strip() not in ("1", "2", "3"):
         e.append("confidence must be 1, 2 or 3")
     ts = r.get("time_spent_sec", "").strip()
-    if ts and not ts.isdigit():
+    if ts and not (ts.isascii() and ts.isdigit()):
         e.append("time_spent_sec must be an integer")
     if sup not in ("not_supported", "cannot_check") and not spans:
         e.append(f"evidence_spans required when support is {sup}")
@@ -156,17 +161,23 @@ def validate(sheet, units=None) -> tuple[dict[str, list[str]], dict]:
     rows = read_sheet(sheet)
     known = {u.unit_id for u in read_jsonl(units, Unit)} if units else None
     errors: dict[str, list[str]] = {}
-    filled = 0
+    filled, seen = 0, set()
     for r in rows:
         uid = r["unit_id"]
+        dup = uid in seen
+        seen.add(uid)
         if not r.get("support", "").strip():
+            if dup:
+                errors.setdefault(uid, []).append("duplicate unit_id row")
             continue
         filled += 1
         errs = validate_row(r)
+        if dup:
+            errs.append("duplicate unit_id row")
         if known is not None and uid not in known:
             errs.append("unit_id not in units file")
         if errs:
-            errors[uid] = errs
+            errors.setdefault(uid, []).extend(errs)
     return errors, {"rows": len(rows), "filled": filled, "unfilled": len(rows) - filled,
                     "rows_with_errors": len(errors), "errors": sum(len(v) for v in errors.values())}
 
@@ -206,7 +217,7 @@ def ingest(sheet, units_path, sources_path, cache, out, annotator=None) -> dict:
             u = units[r["unit_id"]]
             if u.unit_id not in texts:
                 texts[u.unit_id] = source_text(sources.get((u.survey_id, u.cite_key)), Path(cache))
-            spans = _split(r["evidence_spans"], SPAN_SEP.strip())
+            spans = _spans(r["evidence_spans"])
             offs = []
             for s in spans:
                 a, b, m = locate_span(s, texts[u.unit_id])
