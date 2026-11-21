@@ -26,6 +26,7 @@ class Reference:
     doi: Optional[str] = None
     arxiv_id: Optional[str] = None
     url: Optional[str] = None
+    raw: Optional[str] = None  # original entry text (.bib entry or .bbl \bibitem), for auditing and .bbl-only sources
 
 
 @dataclass
