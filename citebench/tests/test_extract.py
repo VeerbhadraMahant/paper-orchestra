@@ -21,11 +21,23 @@ def by_latex(units, needle):
     return [u for u in units if needle in u.sentence_latex]
 
 
-def tex_project(tmp_path, body):
+def check_offsets(root, units):
+    for u in units:
+        text = (Path(root) / u.source_file).read_bytes().decode("utf-8", errors="replace")
+        assert text[u.char_start : u.char_end] == u.sentence_latex
+
+
+def run(tmp_path, body):
     (tmp_path / "main.tex").write_text(
         "\\documentclass{article}\n\\begin{document}\n" + body + "\n\\end{document}\n", encoding="utf-8"
     )
-    return extract(tmp_path, "x")[0]
+    units, stats = extract(tmp_path, "x")
+    check_offsets(tmp_path, units)
+    return units, stats
+
+
+def tex_project(tmp_path, body):
+    return run(tmp_path, body)[0]
 
 
 def test_multifile_and_offsets(multi):
@@ -153,7 +165,8 @@ def test_pylatexenc_failure_falls_back(tmp_path, monkeypatch):
 
 
 def test_missing_input_file_ignored(tmp_path):
-    assert len(tex_project(tmp_path, "\\input{nope}\nHello \\cite{a}.")) == 1
+    units, stats = run(tmp_path, "\\input{nope}\nHello \\cite{a}.")
+    assert len(units) == 1 and stats.unresolved_includes == 1
 
 
 def test_cli_end_to_end(tmp_path, capsys):
@@ -176,3 +189,87 @@ def test_cli_module_entry(tmp_path):
 
 def test_cli_no_main(tmp_path):
     assert main([str(tmp_path), "--survey-id", "s", "--out", str(tmp_path / "o.jsonl")]) == 1
+
+
+def test_escaped_percent_and_double_backslash_comment(tmp_path):
+    us = tex_project(tmp_path, "Gain of 50\\% in \\cite{a}. Line end \\\\% ghost \\cite{ghost}\nNext \\cite{b}.")
+    assert {u.cite_key for u in us} == {"a", "b"}
+
+
+def test_include_outside_root_rejected_and_counted(tmp_path):
+    root = tmp_path / "proj"
+    root.mkdir()
+    (tmp_path / "x.tex").write_text("Leak \\cite{leak}.")
+    absolute = (tmp_path / "x.tex").as_posix()
+    units, stats = run(root, "\\input{../x}\n\\input{../../x}\n\\input{%s}\nOK \\cite{a}." % absolute)
+    assert [u.cite_key for u in units] == ["a"] and stats.unresolved_includes == 3 and stats.files_read == 1
+
+
+def test_list_items_are_separate_sentences(tmp_path):
+    us = tex_project(
+        tmp_path,
+        "\\begin{itemize}\n\\item Alpha one \\cite{a}\n\\item Beta two \\cite{b}\n\\end{itemize}\n"
+        "\\paragraph{Head} Third \\cite{c}",
+    )
+    assert [(u.cite_key, u.cocited_keys) for u in us] == [("a", []), ("b", []), ("c", [])]
+    assert us[0].sentence_latex == "Alpha one \\cite{a}"
+
+
+def test_closing_paren_then_uppercase_splits(tmp_path):
+    us = tex_project(tmp_path, "As shown (see \\cite{a}.) Then more \\cite{b}.")
+    assert [(u.sentence_latex, u.cocited_keys) for u in us] == [
+        ("As shown (see \\cite{a}.)", []), ("Then more \\cite{b}.", [])]
+
+
+def test_etc_splits_before_uppercase_only(tmp_path):
+    us = tex_project(tmp_path, "We use X, etc. Then \\cite{a}. Also Y, etc. \\cite{b} holds.")
+    assert [u.sentence_latex for u in us] == ["Then \\cite{a}.", "Also Y, etc. \\cite{b} holds."]
+
+
+def test_more_cite_commands(tmp_path):
+    us, stats = run(
+        tmp_path,
+        "One \\citeyearpar{a}. Two \\citenum{b}. Three \\cites{c}{d}. Four \\cite[see {[1]}]{e}. "
+        "Five \\citetext{x}. Six \\cites[p.1][q]{f}[r]{g}.",
+    )
+    assert [(u.cite_key, u.cocited_keys) for u in us] == [
+        ("a", []), ("b", []), ("c", ["d"]), ("d", ["c"]), ("e", []), ("f", ["g"]), ("g", ["f"])]
+    assert stats.unmatched_cite_tokens == 0
+    assert us[2].sentence_text == "Three [CITE]." and us[4].sentence_text == "Four [CITE]."
+
+
+def test_unmatched_cite_token_counted(tmp_path):
+    us, stats = run(tmp_path, "A \\citefoo{x} claim. B \\cite{a}. C \\cite without args.")
+    assert [u.cite_key for u in us] == ["a"]
+    assert stats.unmatched_cite_tokens == 2 and stats.unmatched_examples[0].startswith("\\citefoo")
+    assert "unmatched cite tokens: 2" in stats.summary()
+
+
+def test_unterminated_env_counted_rest_extracted(tmp_path):
+    us, stats = run(tmp_path, "Before \\cite{b}.\n\\begin{figure}\nunclosed \\cite{lost}\n\nAfter para \\cite{a}.")
+    assert {u.cite_key for u in us} == {"b", "a"}
+    assert stats.unterminated_envs == 1 and stats.cites_in_skipped_regions == 1
+
+
+def test_cites_in_skipped_regions_counted(tmp_path):
+    _, stats = run(
+        tmp_path, "\\section{On \\cite{t}}\nText \\cite{a}.\n\\begin{figure}\\caption{Cap \\cite{c}}\\end{figure}"
+    )
+    assert stats.cites_in_skipped_regions == 2  # section title + figure (its caption is inside, counted once)
+
+
+def test_dotdot_path_deduplicated(tmp_path):
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.tex").write_text("Hello \\cite{k}.")
+    units, stats = run(tmp_path, "\\input{sub/../a}\n\\input{a}")
+    assert len(units) == 1 and units[0].source_file == "a.tex" and stats.files_read == 2
+
+
+def test_duplicate_bib_key_consistent(tmp_path):
+    (tmp_path / "r.bib").write_text(
+        "@article{k,\n title={First},\n year={2001}\n}\n@article{k,\n title={Second},\n year={2002}\n}\n"
+    )
+    units, stats = run(tmp_path, "Hi \\cite{k}.")
+    r = units[0].reference
+    assert r.title == "First" and r.year == 2001 and "First" in r.raw and "Second" not in r.raw
+    assert stats.duplicate_bib_keys == ["k"]
