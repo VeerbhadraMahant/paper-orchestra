@@ -61,6 +61,13 @@ Items marked **AUTHOR** still need the author.
 
 - **D31 Evidence spans:** offsets only, plus the fetch script; span text from cited papers is not redistributed.
 
+## Added 2026-11-22 (before any test data was seen)
+
+- **D8a Provisional role classifier:** a deterministic keyword and pattern rule set on the citing sentence (`citebench/sample.py`). It is a sampling heuristic only, never a measurement and never shown to the annotator. Its agreement with the annotator's role label is reported as a descriptive check, not used to filter units.
+- **D32 Judge evidence:** judges do not receive whole papers (cached full texts reach about 270,000 characters, beyond an 8B local model's context, and all judges must see identical evidence). Evidence = the first passage of the source (treated as abstract and front matter) plus the top 5 passages by TF-IDF cosine similarity to the citing sentence, from chunks of about 1,200 characters with 200 characters of overlap. For access level `abstract` the evidence is the abstract only. This is a confound to state in the paper: a judge can miss support that sits outside the retrieved passages. The rate at which the annotator's evidence span falls inside the retrieved passages is reported as a retrieval-recall check.
+- **D33 Judge backends:** three interchangeable backends in `citebench/judge.py`: the Claude CLI in print mode with no tools (`--tools ""`, `--strict-mcp-config`, `--no-session-persistence`), a local model through Ollama's HTTP API at temperature 0, and a file backend that writes prompts and reads replies so an orchestrating session can run subagent judges. Every call logs backend, model, prompt version, prompt SHA-256 and timestamps.
+- **D34 Tooling status at time of writing:** the headless Claude CLI login had expired and Ollama had no model installed, so no judge run on real units has happened yet. The harness was tested with fake backends and smoke-tested through the file backend only.
+
 ## Annotation guidelines
 
 - **G1** Strength is not recorded for `contradicted` (stays null), as drafted.
