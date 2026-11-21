@@ -111,3 +111,60 @@ def test_build_rejections(env):
         with pytest.raises(ValueError, match=frag):
             P.build(tmp / "t.csv", tmp / "U.jsonl", tmp / "out")
         assert not (tmp / "out" / "planted_units.jsonl").exists()
+
+
+def multi_units():
+    latex = r"A \cite{a} beats B \citep{b}."
+    base = mk(1, "a", "A [CITE] beats B [CITE].", cocited=["b"])
+    base.sentence_latex = latex
+    return [base, mk(2, "b", "B [CITE] is fine."), mk(3, "z", "Z [CITE] is fine."),
+            Unit(unit_id="dup", survey_id="s1", source_file="m.tex", char_start=9, char_end=10, section="S",
+                 sentence_latex="Y.", sentence_text="Y [CITE].", cite_key="y",
+                 reference=Reference(key="y", title="Title a"))]
+
+
+def test_multi_cite_planted_keeps_other_mask_and_wrong_paper(tmp_path):
+    from citebench.judge import target_sentence
+    units = multi_units()
+    base = units[0]
+    write_jsonl(tmp_path / "U.jsonl", units)
+    write_tpl(tmp_path / "t.csv", [
+        trow(base, "number_changed", "A [CITE] beats B [OTHER] by 60%."),
+        trow(base, "wrong_paper", key="z")])
+    P.build(tmp_path / "t.csv", tmp_path / "U.jsonl", tmp_path / "out")
+    pu = {p.unit_id: p for p in read_jsonl(tmp_path / "out" / "planted_units.jsonl", Unit)}
+    meta = {m["type"]: m for m in map(json.loads, open(tmp_path / "out" / "planted_meta.jsonl", encoding="utf-8"))}
+    nc, wp = pu[meta["number_changed"]["planted_unit_id"]], pu[meta["wrong_paper"]["planted_unit_id"]]
+    assert nc.sentence_latex == base.sentence_latex  # original LaTeX kept
+    assert target_sentence(nc) == "A [CITE] beats B [OTHER] by 60%."
+    assert wp.cite_key == "z" and target_sentence(wp) == "A [CITE] beats B [OTHER]."
+    assert wp.sentence_text == "A [CITE] beats B [OTHER]."
+    assert meta["wrong_paper"]["original_sentence_text"] == "A [CITE] beats B [OTHER]."
+    ctl = pu[meta["none"]["planted_unit_id"]]
+    assert target_sentence(ctl) == "A [CITE] beats B [OTHER]."
+
+
+def test_template_shows_masked_original(tmp_path):
+    units = multi_units()
+    write_jsonl(tmp_path / "U.jsonl", units)
+    (tmp_path / "L.jsonl").write_text(json.dumps(lab(units[0])), encoding="utf-8")
+    P.template(tmp_path / "L.jsonl", tmp_path / "U.jsonl", tmp_path / "t.csv", all_eligible=True)
+    rows = list(csv.DictReader(open(tmp_path / "t.csv", encoding="utf-8-sig")))
+    assert rows and all(r["original_sentence_text"] == "A [CITE] beats B [OTHER]." for r in rows)
+
+
+def test_build_multi_cite_rejections(tmp_path):
+    units = multi_units()
+    base = units[0]
+    write_jsonl(tmp_path / "U.jsonl", units)
+    for rows, frag in [
+        ([trow(base, "negation", "A [CITE] does not beat B [CITE].")], "exactly 1 .CITE. and 1 .OTHER."),
+        ([trow(base, "negation", "A [CITE] does not beat B.")], "exactly"),
+        ([trow(base, "negation", "A does not beat B [OTHER].")], "exactly"),
+        ([trow(base, "wrong_paper", key="b")], "co-cited"),
+        ([trow(base, "wrong_paper", key="y")], "same work"),
+        ([trow(base, "negation", "A [CITE] beats B [OTHER].")], "identical"),
+    ]:
+        write_tpl(tmp_path / "t.csv", rows)
+        with pytest.raises(ValueError, match=frag):
+            P.build(tmp_path / "t.csv", tmp_path / "U.jsonl", tmp_path / "out")

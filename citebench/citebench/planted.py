@@ -1,6 +1,13 @@
 """Planted-set bookkeeping (D13 to D15). The author edits sentences by hand; these scripts only manage copies.
 
 No LLM is ever called here (D15). Hints are advisory and never decide eligibility.
+
+Multi-cite sentences: the judge marks only the target citation as [CITE] and the others as [OTHER]
+(judge.target_sentence). A planted copy keeps the original sentence_latex and stores the author's edited text in
+sentence_text in that masked form. The template shows the masked original, so the author edits the masked text and
+must keep the [CITE] and [OTHER] tokens (same counts as the masked original). judge.target_sentence returns text
+that contains [OTHER] unchanged, so the mask survives. For wrong_paper only the source changes: the key is
+replaced and the masked original text is kept.
 """
 
 from __future__ import annotations
@@ -15,6 +22,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+from citebench.judge import same_work, target_sentence
 from citebench.units import Unit, read_jsonl, write_jsonl
 
 TYPES = ("wrong_paper", "number_changed", "hedge_dropped", "scope_widened", "negation",
@@ -99,7 +107,7 @@ def template(labels_path, units_path, out, selections=None, all_eligible=False) 
         for uid, t in pairs:
             u = by_id[uid]
             w.writerow({"planted_id": f"{uid}:{t}", "unit_id": uid, "type": t,
-                        "original_sentence_text": u.sentence_text, "edited_sentence_text": "",
+                        "original_sentence_text": target_sentence(u), "edited_sentence_text": "",
                         "wrong_paper_key": _suggest_key(u, units) if t == "wrong_paper" else "", "notes": ""})
     return len(pairs)
 
@@ -118,6 +126,7 @@ def build(template_path, units_path, out_dir) -> dict:
         if u is None:
             errors.append(f"{pid}: unit_id not in units")
             continue
+        masked = target_sentence(u)
         if t not in TYPES:
             errors.append(f"{pid}: unknown type {t!r}")
             continue
@@ -134,26 +143,35 @@ def build(template_path, units_path, out_dir) -> dict:
             if key == u.cite_key:
                 errors.append(f"{pid}: wrong_paper_key equals the original key")
                 continue
-            if edited and edited != u.sentence_text:
+            if key in u.cocited_keys:
+                errors.append(f"{pid}: wrong_paper_key {key!r} is co-cited in the same sentence")
+                continue
+            if same_work(donor.reference, u.reference):
+                errors.append(f"{pid}: wrong_paper_key {key!r} is the same work as the original (DOI, arXiv id or title)")
+                continue
+            if edited and edited not in (masked, u.sentence_text):
                 errors.append(f"{pid}: wrong_paper changes the source only; leave edited text empty or unchanged")
                 continue
             new.cite_key = key
             new.reference = copy.deepcopy(donor.reference)
-            new.cocited_keys = [k for k in u.cocited_keys if k != key]
-            edited = u.sentence_text
+            new.sentence_text = edited = masked
         else:
             if not edited:
                 errors.append(f"{pid}: edited_sentence_text is empty")
                 continue
-            if edited == u.sentence_text:
+            if edited in (masked, u.sentence_text):
                 errors.append(f"{pid}: edited text is identical to the original")
                 continue
-            new.sentence_text = edited
-            new.sentence_latex = edited  # the original LaTeX no longer matches the edited text
+            n_cite, n_other = masked.count("[CITE]"), masked.count("[OTHER]")
+            if edited.count("[CITE]") != n_cite or edited.count("[OTHER]") != n_other:
+                errors.append(f"{pid}: edited text must contain exactly {n_cite} [CITE] and {n_other} [OTHER] "
+                              "token(s), as in the original")
+                continue
+            new.sentence_text = edited  # sentence_latex stays the original; see the module docstring
         planted.append(new)
         bases[uid] = u
         meta.append({"planted_id": pid, "unit_id": uid, "planted_unit_id": new.unit_id, "type": t,
-                     "original_sentence_text": u.sentence_text, "edited_sentence_text": edited,
+                     "original_sentence_text": masked, "edited_sentence_text": edited,
                      "wrong_paper_key": key if t == "wrong_paper" else None, "notes": r.get("notes", "").strip(),
                      "gold": {"rule": RULE_OF[t], **GOLD[RULE_OF[t]], "expected_detected": True}})
     if errors:
