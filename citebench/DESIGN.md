@@ -1,6 +1,6 @@
 # CiteBench-Survey: design plan (draft for approval)
 
-Working name only. Status: in progress. Extractor, fetcher, annotation guidelines and protocol exist (see README.md); no labels or judge runs yet. Created 2026-11-21.
+Working name only. Status (2026-11-22): in progress. Extractor, fetcher, judge harness, evaluation, annotation and planted-error tooling exist (see README.md). The 10 corpus surveys are drawn and the 200 test units are sampled (`data/sample/manifest_v1.json`); no human labels and no judge runs on the test set yet. Created 2026-11-21.
 
 ## 1. One-sentence pitch
 

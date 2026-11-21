@@ -164,3 +164,4 @@ Any change to this protocol after a test unit has been sampled or any system has
 | 2026-11-22 | Open items resolved per `DECISIONS.md` (D1 to D31, G1 to G5) | Settle the `[TO CONFIRM]` items | Before |
 | 2026-11-22 | The extractor was smoke-tested on candidate survey 2303.18223 (counts of sentences and units only; no unit was read for labeling or sampled) | Check the extractor on real LaTeX | Before |
 | 2026-11-22 | Rule for numbers vs `contradicted` made explicit (guidelines section 3) | Review found the boundary undefined | Before |
+| 2026-11-22 | Second fetch pass for the 17 candidate references whose first pass failed with HTTP 429 (rate limit); results appended, last record per reference used by D10. One unit of the 200 changed (one in, one out); no reference lost access | Rate-limit failures are transient and not a property of the reference. Done before any annotation or judge run on the test set | Before |
