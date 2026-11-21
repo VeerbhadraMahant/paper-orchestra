@@ -20,10 +20,15 @@ from .units import Reference, Unit, make_unit_id, write_jsonl
 # ---------------------------------------------------------------- patterns
 
 COMMENT_RE = re.compile(r"(?<!\\)(?:\\\\)*(%[^\n]*)")
-CITE_RE = re.compile(
-    r"\\(?P<cmd>[Cc]ite(?:p|t|alp|alt|author|year)?|[Pp]arencite|[Tt]extcite|[Aa]utocite|[Ff]ootcite|nocite)"
-    r"\*?\s*(?:\[[^\]]*\]\s*){0,2}\{(?P<keys>[^{}]*)\}"
+CITE_CMD_RE = re.compile(
+    r"\\(?P<cmd>[Cc]ite(?:p|t|alp|alt|author|year|yearpar|num|s|text)?|[Pp]arencite|[Tt]extcite|[Aa]utocite"
+    r"|[Ff]ootcite|nocite)(?![A-Za-z])\*?"
 )
+CITE_TOKEN_RE = re.compile(r"\\[Cc]ite[a-zA-Z]*")
+BEGIN_ANY_RE = re.compile(r"\\begin\s*\{")
+ITEM_RE = re.compile(r"\\item(?![A-Za-z])")
+LIST_ENV_RE = re.compile(r"\\(?:begin|end)\s*\{(?:itemize|enumerate|description)\}")
+PARAGRAPH_RE = re.compile(r"\\(?:sub)?paragraph\*?\s*(?:\[[^\]]*\]\s*)?\{")
 ENV_RE = re.compile(
     r"\\begin\s*\{(figure|table|equation|align|algorithm|tabular|verbatim|lstlisting|thebibliography"
     r"|gather|multline|eqnarray)\*?\}"
@@ -37,8 +42,9 @@ END_DOC_RE = re.compile(r"\\end\s*\{document\}")
 PB_RE = re.compile(r"\n(?:[ \t\r]*\n)+")
 WS_RE = re.compile(r"\s+")
 ABBR_RE = re.compile(
-    r"(?<![A-Za-z])(?:e\.g|i\.e|et[\s~]+al|etc|vs|figs?|eqs?|sec|tab|cf|resp|approx|no|dr)\.$", re.I
+    r"(?<![A-Za-z])(?:e\.g|i\.e|et[\s~]+al|vs|figs?|eqs?|sec|tab|cf|resp|approx|no|dr)\.$", re.I
 )
+ETC_RE = re.compile(r"(?<![A-Za-z])etc\.$", re.I)
 _ID = r"(\d{4}\.\d{4,5}|[a-z\-]+(?:\.[A-Za-z]{2})?/\d{7})"
 ARXIV_RES = [re.compile(p, re.I) for p in (r"arxiv\s*[:/ ]\s*" + _ID, r"arxiv\.org/(?:abs|pdf)/" + _ID, r"\babs/" + _ID)]
 DOI_RE = re.compile(r"10\.\d{4,9}/[^\s{}\\,]+")
@@ -71,6 +77,65 @@ def match_brace(t: str, i: int) -> int:
                 return i + 1
         i += 1
     return -1
+
+
+def _skip_ws(s: str, j: int) -> int:
+    while j < len(s) and s[j].isspace():
+        j += 1
+    return j
+
+
+def _skip_opts(s: str, j: int, n: int = 2) -> int:
+    """Skip up to n optional [..] groups; braces inside are balanced, so a ']' within {..} does not close one."""
+    for _ in range(n):
+        k = _skip_ws(s, j)
+        if s[k : k + 1] != "[":
+            break
+        d, q = 0, k + 1
+        while q < len(s):
+            c = s[q]
+            if c == "\\":
+                q += 2
+                continue
+            if c == "{":
+                d += 1
+            elif c == "}":
+                d -= 1
+            elif c == "]" and d <= 0:
+                break
+            q += 1
+        else:
+            break
+        j = q + 1
+    return j
+
+
+def find_cites(s: str) -> list[tuple[int, int, str, list[str]]]:
+    """(start, end, cmd, keys) per parsable citation command. \\citetext carries no key and is ignored.
+    \\cites takes consecutive {keys} groups (biblatex multicite); every other command takes one."""
+    out, pos = [], 0
+    while m := CITE_CMD_RE.search(s, pos):
+        pos = m.end()
+        cmd = m.group("cmd")
+        if cmd.lower() == "citetext":
+            continue
+        j, end, groups = _skip_opts(s, m.end()), m.end(), []
+        while True:
+            k = _skip_ws(s, j)
+            e = match_brace(s, k) if s[k : k + 1] == "{" else -1
+            if e < 0:
+                break
+            groups.append(s[k + 1 : e - 1])
+            end = e
+            if cmd.lower() != "cites":
+                break
+            j = _skip_opts(s, e)
+        if not groups or any("{" in g or "}" in g for g in groups):
+            continue
+        keys = [x.strip() for g in groups for x in g.split(",") if x.strip()]
+        out.append((m.start(), end, cmd, keys))
+        pos = end
+    return out
 
 
 def read_text(p: Path) -> str:
@@ -120,13 +185,20 @@ def segments(work: str, pbs: dict[int, int], a: int, b: int):
             elif c == "}":
                 depth = max(0, depth - 1)
             elif c in ".?!" and depth == 0:
-                m = WS_RE.match(work, i + 1, b)
-                ok = (i + 1 >= b) or (m is not None and (m.end() >= b or work[m.end()].isupper() or work[m.end()] == "\\"))
-                if ok and c == "." and ABBR_RE.search(work, max(a, i - 14), i + 1):
+                j = i + 1
+                while j < b and work[j] in ")]'\"":  # closing punctuation stays with the sentence
+                    j += 1
+                m = WS_RE.match(work, j, b)
+                nxt = work[m.end()] if m is not None and m.end() < b else ""
+                ok = j >= b or (m is not None and (m.end() >= b or nxt.isupper() or nxt == "\\"))
+                if ok and c == "." and ETC_RE.search(work, max(a, i - 4), i + 1):
+                    ok = j >= b or nxt.isupper()  # "etc. Then" splits; "etc. \cite{x}" does not
+                elif ok and c == "." and ABBR_RE.search(work, max(a, i - 14), i + 1):
                     ok = False
                 if ok:
-                    yield start, i + 1
-                    start = i + 1
+                    yield start, j
+                    start = i = j
+                    continue
         i += 1
     if start < b:
         yield start, b
@@ -144,10 +216,13 @@ def _arxiv_id(*texts: str | None) -> str | None:
     return None
 
 
+BIB_KEY_RE = re.compile(r"(?m)^[ \t]*@\w+\s*[{(]\s*([^,\s]+)\s*,")
+
+
 def _bib_raw_entries(text: str) -> dict[str, str]:
     bounds = [m.start() for m in re.finditer(r"(?m)^[ \t]*@\w+\s*[{(]", text)] + [len(text)]
     out = {}
-    for m in re.finditer(r"(?m)^[ \t]*@\w+\s*[{(]\s*([^,\s]+)\s*,", text):
+    for m in BIB_KEY_RE.finditer(text):
         nxt = next(b for b in bounds if b > m.start())
         out.setdefault(m.group(1), text[m.start() : nxt].strip())
     return out
@@ -184,7 +259,10 @@ def parse_bib(text: str) -> dict[str, Reference]:
     parser = BibTexParser(common_strings=True, ignore_nonstandard_types=False)
     raws = _bib_raw_entries(text)
     db = parser.parse(text)
-    return {e["ID"]: _bib_reference(e, raws.get(e["ID"])) for e in db.entries}
+    out: dict[str, Reference] = {}
+    for e in db.entries:  # first entry wins, as in _bib_raw_entries, so raw and fields come from one entry
+        out.setdefault(e["ID"], _bib_reference(e, raws.get(e["ID"])))
+    return out
 
 
 def parse_bbl(text: str) -> dict[str, Reference]:
@@ -241,6 +319,13 @@ class Stats:
     distinct_keys: int = 0
     missing_keys: list[str] = field(default_factory=list)
     bib_errors: list[str] = field(default_factory=list)
+    # silent-loss counters
+    unresolved_includes: int = 0  # missing, or resolving outside the source root (\input, \include, \subfile, files)
+    cites_in_skipped_regions: int = 0  # citation commands inside skipped envs, captions, section/paragraph titles
+    unterminated_envs: int = 0  # \begin{X} of a skipped env with no \end{X}
+    unmatched_cite_tokens: int = 0  # \cite* tokens the parser could not read
+    unmatched_examples: list[str] = field(default_factory=list)
+    duplicate_bib_keys: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         lines = [
@@ -249,27 +334,45 @@ class Stats:
             f"units: {self.units}",
             f"distinct keys: {self.distinct_keys}",
             f"keys missing from bibliography: {len(self.missing_keys)}",
+            f"unresolved includes: {self.unresolved_includes}",
+            f"cites in skipped regions: {self.cites_in_skipped_regions}",
+            f"unterminated envs: {self.unterminated_envs}",
+            f"unmatched cite tokens: {self.unmatched_cite_tokens}",
+            f"duplicate bib keys: {len(self.duplicate_bib_keys)}",
         ]
+        lines += [f"unmatched cite example: {e}" for e in self.unmatched_examples]
         lines += [f"bibliography error: {e}" for e in self.bib_errors]
         return "\n".join(lines)
 
 
+def _merge(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    for s, e in sorted(spans):
+        if out and s < out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], e))
+        else:
+            out.append((s, e))
+    return out
+
+
 class _Extractor:
     def __init__(self, root: Path, survey_id: str, refs: dict[str, Reference]):
-        self.root, self.survey_id, self.refs = root, survey_id, refs
+        self.root, self.survey_id, self.refs = root, survey_id, refs  # root must already be resolved
         self.units: list[Unit] = []
         self.stats = Stats()
         self.visited: set[Path] = set()
         self.section: str | None = None
 
     def resolve(self, name: str, parent: Path) -> Path | None:
+        """Resolved path of an included file, or None if missing or outside the root."""
         name = name.strip()
         for base in (self.root, parent.parent):
             for cand in (base / name, base / (name + ".tex")):
                 try:
-                    if cand.is_file() and cand.resolve().is_relative_to(self.root.resolve()):
-                        return cand
-                except OSError:
+                    r = cand.resolve()
+                    if r.is_file() and r.is_relative_to(self.root):
+                        return r
+                except (OSError, ValueError):
                     pass
         return None
 
@@ -289,12 +392,19 @@ class _Extractor:
         while m := ENV_RE.search(work, pos, b):
             name = m.group(0)[m.group(0).index("{") + 1 : -1]
             pat = re.compile(r"\\(begin|end)\s*\{%s\}" % re.escape(name))
-            depth, end = 1, b
+            depth, end = 1, None
             for mm in pat.finditer(work, m.end(), b):
                 depth += 1 if mm.group(1) == "begin" else -1
                 if depth == 0:
                     end = mm.end()
                     break
+            if end is None:
+                # Unterminated: skip only to the end of the paragraph, or the next \begin or section, whichever
+                # comes first, so one missing \end does not swallow the rest of the file.
+                self.stats.unterminated_envs += 1
+                nxt = [x.start() for x in (BEGIN_ANY_RE.search(work, m.end(), b), SECTION_RE.search(work, m.end(), b),
+                                           PB_RE.search(pb, m.end(), b)) if x]
+                end = min(nxt + [b])
             skips.append((m.start(), end))
             pos = end
         for m in CAPTION_RE.finditer(work, a, b):
@@ -308,11 +418,22 @@ class _Extractor:
 
         inputs = [(m.start(), m.end(), m.group(1)) for m in INPUT_RE.finditer(work, a, b) if not skipped(m.start())]
         secs, blanks = [], list(skips) + [(s, e) for s, e, _ in inputs]
+        titles = []  # title spans whose citations are dropped
         for m in SECTION_RE.finditer(work, a, b):
             end = match_brace(work, m.end() - 1)
             if end > 0 and not skipped(m.start()):
                 secs.append((m.start(), plain(work[m.end() : end - 1])))
                 blanks.append((m.start(), end))
+                titles.append((m.start(), end))
+        for m in PARAGRAPH_RE.finditer(work, a, b):  # run-in headings: sentence boundary, not a section
+            end = match_brace(work, m.end() - 1)
+            if end > 0 and not skipped(m.start()):
+                blanks.append((m.start(), end))
+                titles.append((m.start(), end))
+        for rx in (ITEM_RE, LIST_ENV_RE):  # each list item is its own sentence even without a period
+            blanks += [m.span() for m in rx.finditer(work, a, b) if not skipped(m.start())]
+        for s, e in _merge(skips + titles):
+            self.stats.cites_in_skipped_regions += sum(1 for c in find_cites(work[s:e]) if c[2] != "nocite")
         w, p = list(work), list(pb)
         for s, e in blanks:  # blank with a forced paragraph break so sentences cannot span the gap
             for arr in (w, p):
@@ -337,26 +458,35 @@ class _Extractor:
             while si < len(secs) and secs[si][0] < ipos:
                 self.section = secs[si][1]
                 si += 1
-            child = self.resolve(name, path) if name else None
-            if child is not None and child not in self.visited:
-                self.file(child)
+            if name is not None:
+                child = self.resolve(name, path)
+                if child is None:
+                    self.stats.unresolved_includes += 1
+                elif child not in self.visited:
+                    self.file(child)
             pos = iend
 
     def sentence(self, rel: str, text: str, work: str, s: int, e: int) -> None:
         sw = work[s:e]
-        cites = list(CITE_RE.finditer(sw))
+        cites = find_cites(sw)
+        parsed = {c[0] for c in cites}
+        for m in CITE_TOKEN_RE.finditer(sw):
+            if m.start() not in parsed and m.group().lower() != "\\citetext":
+                self.stats.unmatched_cite_tokens += 1
+                if len(self.stats.unmatched_examples) < 5:
+                    self.stats.unmatched_examples.append(sw[m.start() : m.start() + 40].replace("\n", " "))
         keys: list[str] = []
-        for m in cites:
-            for k in (x.strip() for x in m.group("keys").split(",")) if m.group("cmd") != "nocite" else ():
-                if k and k not in keys:
+        for _, _, cmd, ks in cites:
+            for k in ks if cmd != "nocite" else ():
+                if k not in keys:
                     keys.append(k)
         if not keys:
             return
         self.stats.sentences_with_citations += 1
         parts, last = [], 0
-        for m in cites:
-            parts += [sw[last : m.start()], "" if m.group("cmd") == "nocite" else "[CITE]"]
-            last = m.end()
+        for cs, ce, cmd, _ in cites:
+            parts += [sw[last:cs], "" if cmd == "nocite" else "[CITE]"]
+            last = ce
         parts.append(sw[last:])
         sentence_text = plain("".join(parts))
         for k in keys:
@@ -375,6 +505,23 @@ class _Extractor:
             ))
 
 
+def _files_in_root(root: Path, pattern: str, stats: Stats) -> list[Path]:
+    """Resolved paths of files matching pattern under root; those resolving outside it (symlinks) are counted."""
+    out = []
+    for p in sorted(root.rglob(pattern)):
+        if p.is_dir():
+            continue
+        try:
+            r = p.resolve()
+        except OSError:
+            r = None
+        if r is not None and r.is_file() and r.is_relative_to(root):
+            out.append(r)
+        else:
+            stats.unresolved_includes += 1
+    return sorted(set(out))
+
+
 def _find_main(root: Path, tex_files: list[Path]) -> Path:
     cands, included = [], set()
     for p in tex_files:
@@ -383,8 +530,11 @@ def _find_main(root: Path, tex_files: list[Path]) -> Path:
             cands.append(p)
         for m in INPUT_RE.finditer(work):
             for cand in (root / m.group(1).strip(), root / (m.group(1).strip() + ".tex")):
-                if cand.is_file():
-                    included.add(cand)
+                try:
+                    if cand.resolve().is_file():
+                        included.add(cand.resolve())
+                except (OSError, ValueError):
+                    pass
     if not cands:
         raise FileNotFoundError(f"no main .tex file (\\documentclass + \\begin{{document}}) under {root}")
     free = [c for c in cands if c not in included] or cands
@@ -394,23 +544,32 @@ def _find_main(root: Path, tex_files: list[Path]) -> Path:
 def load_bibliography(root: Path, stats: Stats) -> dict[str, Reference]:
     """All .bib files merged (first wins); .bbl entries only fill keys the .bib files lack."""
     refs: dict[str, Reference] = {}
+    dups: set[str] = set(stats.duplicate_bib_keys)
+    root = root.resolve()
     for pattern, parse in (("*.bib", parse_bib), ("*.bbl", parse_bbl)):
-        for p in sorted(root.rglob(pattern)):
+        for p in _files_in_root(root, pattern, stats):
             try:
-                for k, r in parse(read_text(p)).items():
+                text = read_text(p)
+                if pattern == "*.bib":
+                    keys = BIB_KEY_RE.findall(text)
+                    dups |= {k for k in keys if keys.count(k) > 1}
+                for k, r in parse(text).items():
+                    if k in refs and pattern == "*.bib":
+                        dups.add(k)
                     refs.setdefault(k, r)
             except Exception as ex:
                 stats.bib_errors.append(f"{p.relative_to(root).as_posix()}: {type(ex).__name__}: {ex}")
+    stats.duplicate_bib_keys = sorted(dups)
     return refs
 
 
 def extract(source_dir: str | Path, survey_id: str) -> tuple[list[Unit], Stats]:
-    root = Path(source_dir)
+    root = Path(source_dir).resolve()
     stats = Stats()
     refs = load_bibliography(root, stats)
     ex = _Extractor(root, survey_id, refs)
     ex.stats = stats
-    ex.file(_find_main(root, sorted(root.rglob("*.tex"))))
+    ex.file(_find_main(root, _files_in_root(root, "*.tex", stats)))
     keys = {u.cite_key for u in ex.units}
     stats.units = len(ex.units)
     stats.distinct_keys = len(keys)
