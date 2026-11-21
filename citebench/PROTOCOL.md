@@ -134,7 +134,7 @@ Missing outputs (a system fails to answer, a call times out) are counted as erro
 ## 8. Reproducibility and zero-budget constraints
 
 - Budget is zero. Claude judges run as Claude Code subagents on the author's existing plan; local judges run on the RTX 4060. No paid APIs.
-- Fetching uses only free sources: arXiv, Semantic Scholar without a key, OpenAlex, Unpaywall, PubMed Central. Source text is cached by hash; the access level and the matched title are recorded per reference.
+- Fetching uses only free sources: arXiv, Semantic Scholar without a key, OpenAlex. Unpaywall is not used because it requires an email address on every request. Source text is cached by hash; the access level and the matched title are recorded per reference.
 - For every judge call, log: system, model ID as reported by the runtime, date and time, condition, prompt hash, the unit_id and the raw output. Calls are cached so that a rerun does not change recorded results. Runs are batched and resumable.
 - Subagent outputs are not bit-reproducible and the model version behind an alias can change. Therefore each result is tied to the logged model ID and date, and the write-up states this as a limitation. Each judge is run once per unit and condition; on a 50-unit subset, 3 runs per judge are made to estimate run-to-run variation (D28).
 - Limits of Claude Code subagents: no control over sampling parameters (subagents do not expose temperature, so settings are observed and logged, not set; the local judge runs at temperature 0, D29), shared plan usage limits that may stop a run midway, hidden system prompts and tool use that differ from a bare API call, and possible changes in the underlying model during the study. Judge subagents are run without access to the web or to the repository's labels. Claude judges run as a dedicated subagent type with no tools (no web, no file access) that receives only the unit and the source text, so verdicts cannot come from browsing (D30).
@@ -162,3 +162,5 @@ Any change to this protocol after a test unit has been sampled or any system has
 |---|---|---|---|
 | 2026-11-22 | Version 0.1 created | Initial draft | Before |
 | 2026-11-22 | Open items resolved per `DECISIONS.md` (D1 to D31, G1 to G5) | Settle the `[TO CONFIRM]` items | Before |
+| 2026-11-22 | The extractor was smoke-tested on candidate survey 2303.18223 (counts of sentences and units only; no unit was read for labeling or sampled) | Check the extractor on real LaTeX | Before |
+| 2026-11-22 | Rule for numbers vs `contradicted` made explicit (guidelines section 3) | Review found the boundary undefined | Before |

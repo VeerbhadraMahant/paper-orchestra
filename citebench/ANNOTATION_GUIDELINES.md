@@ -55,7 +55,7 @@ Judge the claim attributed to this cited work against the source text.
 
 Rule of thumb for 5 versus 6: if you can name the part that is supported and quote it, it is `partially_supported`. If you cannot quote anything relevant, it is `not_supported`.
 
-Key numbers (G5). If a number that is central to the sentence differs from the source beyond rounding (section 7), the label is at most `partially_supported`, with strength `overstated` and type `number_changed` when the sentence is stronger. Do not use `supported` in this case, even when the direction of the claim is right. If the numbers cannot be reconciled at all, see `contradicted`.
+Key numbers (G5). If a number that is central to the sentence differs from the source beyond rounding (section 7), the label is at most `partially_supported`, with strength `overstated` and type `number_changed` when the sentence is stronger. Do not use `supported` in this case, even when the direction of the claim is right. Use `contradicted` only when the source's number reverses the direction of the claim or makes its qualitative conclusion false (the sentence says a method improves accuracy, the source reports a drop). A number in the right direction but with a different size is never `contradicted`: it is `partially_supported` as above.
 
 Rule of thumb for 4 versus 5 when the source says less than the sentence: if the only difference is a hedge, a scope limit, or the strength of wording (the source finds the same effect but more cautiously), label `supported` and record the difference in the strength label. Use `partially_supported` only when a separate piece of content is missing.
 
@@ -74,7 +74,7 @@ If `overstated`, pick one or more types:
 - **hedge_dropped**: the source qualifies the claim ("can", "in some cases", "suggests", "we hypothesise") and the sentence states it flatly.
 - **scope_widened**: the source's result holds for a narrower set (one dataset, one model family, one language, one task, small models, a subset of cases) and the sentence states it for a wider set ("all", "in general", "models", "medical imaging" for one dataset).
 - **causal_from_correlational**: the source reports an association, correlation or observational result, and the sentence says one thing causes, drives, or leads to the other.
-- **number_changed**: a figure in the sentence differs from the source in a way rounding does not explain (different value, unit or baseline; "doubles" for a 30% gain) and the change makes the claim stronger. Write the two numbers in `notes`. A changed number that makes the claim weaker is not overstatement: record `understated`, or `contradicted` if the numbers cannot be reconciled.
+- **number_changed**: a figure in the sentence differs from the source in a way rounding does not explain (different value, unit or baseline; "doubles" for a 30% gain) and the change makes the claim stronger. Write the two numbers in `notes`. A changed number that makes the claim weaker is not overstatement: record `understated` (still at most `partially_supported`, per section 3), or `contradicted` only under the direction rule in section 3.
 - **certainty_inflated**: the sentence adds confidence or proof the source does not claim ("proves", "conclusively shows", "it is well established") where the source offers limited or preliminary evidence. When a specific hedge in the source was removed, also mark `hedge_dropped`.
 - **other**: any other way the sentence is stronger than the source. Describe it in `notes`. Prefer a named type when one fits.
 

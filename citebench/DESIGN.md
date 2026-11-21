@@ -1,6 +1,6 @@
 # CiteBench-Survey: design plan (draft for approval)
 
-Working name only. Status: proposal, nothing built. Date: 2026-11-21.
+Working name only. Status: in progress. Extractor, fetcher, annotation guidelines and protocol exist (see README.md); no labels or judge runs yet. Created 2026-11-21.
 
 ## 1. One-sentence pitch
 
@@ -64,7 +64,7 @@ Our gap: human-labeled survey citations, an explicit memory-reliance test, and s
 
 1. Existence-only check (refchecker or the PaperOrchestra-style Semantic Scholar match): baseline that ignores content.
 2. Single-prompt LLM judge, at three model sizes (Haiku, Sonnet, Opus), run as Claude Code subagents.
-3. Free local open-weights judge on the RTX 4060 (8 GB), e.g. a 7B to 8B model at 4-bit via Ollama or llama.cpp. Adds a second model family at zero cost and is fully reproducible (pinned weights).
+3. Free local open-weights judge on the RTX 4060 (8 GB), e.g. a 7B to 8B model at 4-bit via Ollama or llama.cpp, with a 4B fallback if throughput is too low (D16). Adds a second model family at zero cost and is fully reproducible (pinned weights).
 4. sciwrite-lint (optional). Its README assumes 16+ GB VRAM and WSL2; the RTX 4060 is the right generation (Ada, FP8) but has 8 GB. Try a reduced config; if it cannot run, drop it and say so in the paper.
 5. Academic Research Skills claim audit (`ARS_CLAIM_AUDIT=1`).
 6. Our minimal harness (below), used mainly to run conditions consistently, not as a competing product.
@@ -86,7 +86,7 @@ Our gap: human-labeled survey citations, an explicit memory-reliance test, and s
 - `eval`: metrics, CIs, tables.
 - Skills/commands wrap these for Claude Code use.
 - Budget is zero (decided 2026-11-21): Claude judges run as Claude Code subagents on the author's existing plan; local judges run on the RTX 4060. No paid APIs.
-- Consequences to handle: (a) plan usage limits, so judge runs are batched and resumable from a cache; (b) subagent outputs are not bit-reproducible, so every call logs model ID, date, prompt hash and output, and the paper reports this as a limitation; (c) fetching uses only free sources (arXiv, Semantic Scholar without a key, OpenAlex, Unpaywall, PubMed Central).
+- Consequences to handle: (a) plan usage limits, so judge runs are batched and resumable from a cache; (b) subagent outputs are not bit-reproducible, so every call logs model ID, date, prompt hash and output, and the paper reports this as a limitation; (c) fetching uses only free sources (implemented: arXiv, Semantic Scholar without a key, OpenAlex). Unpaywall is not used because it requires an email address on every request.
 
 ## 8. Milestones (rough estimates, to be revised after the pilot)
 
@@ -111,4 +111,4 @@ Our gap: human-labeled survey citations, an explicit memory-reliance test, and s
 4. Judges: Claude Code subagents plus free local models; zero budget.
 5. No advisor yet. Treat it as an independent project aimed at a workshop paper or technical report; revisit once an advisor is found.
 
-Still open: who the second annotator is; confirmation of which repo is forked; GitHub username for the fork (author does the fork themselves).
+Still open: who the second annotator is (DECISIONS.md A1, A2). The fork is github.com/VeerbhadraMahant/paper-orchestra, with this project in `citebench/`.
