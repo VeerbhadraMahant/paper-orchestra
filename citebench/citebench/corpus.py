@@ -43,18 +43,21 @@ def eligible(candidates: list[dict], exclude_ids: set[str] | frozenset[str] = fr
 
 
 def draw(eligible_list: list[dict], n: int = 10, per_subfield_cap: int = 2, seed: int = SEED):
-    """D6/D7: seeded order within each subfield, then round-robin over subfields (sorted). Returns (selection, log)."""
-    rng = random.Random(seed)
+    """D6/D7: each subfield is shuffled with its own generator (seed|subfield) from the arxiv_id-sorted list, so a
+    subfield's order does not depend on which other subfields exist. Subfields are visited round-robin in a seeded
+    shuffle of the sorted subfield names (not alphabetical). Returns (selection, log)."""
     by_sf: dict[str, list[dict]] = {}
     for c in sorted(eligible_list, key=lambda c: c["arxiv_id"]):
         by_sf.setdefault(c["subfield"], []).append(c)
-    for sf in sorted(by_sf):
-        rng.shuffle(by_sf[sf])
+    for sf in by_sf:
+        random.Random(f"{seed}|{sf}").shuffle(by_sf[sf])
+    sf_order = sorted(by_sf)
+    random.Random(f"{seed}|subfields").shuffle(sf_order)
     taken = {sf: 0 for sf in by_sf}
     sel, log = [], []
     while len(sel) < n:
         progressed = False
-        for sf in sorted(by_sf):
+        for sf in sf_order:
             if len(sel) >= n:
                 break
             if taken[sf] >= per_subfield_cap or not by_sf[sf]:
@@ -73,21 +76,29 @@ def draw(eligible_list: list[dict], n: int = 10, per_subfield_cap: int = 2, seed
 
 # ---- safe source extraction ----
 
+_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+MAX_UNPACKED = 500 * 1024 * 1024  # decompressed bytes, and total extracted bytes
+MAX_MEMBERS = 5000
+
+
 def _safe_target(dest: Path, name: str) -> Path:
     p = Path(name)
-    if p.is_absolute() or name.startswith(("/", "\\")) or ".." in p.parts or (len(name) > 1 and name[1] == ":"):
+    if p.is_absolute() or name.startswith("/") or ".." in p.parts or ":" in name or "\\" in name:
         raise ValueError(f"unsafe tar member path: {name!r}")
+    if any(part.split(".")[0].strip().upper() in _RESERVED for part in name.split("/")):
+        raise ValueError(f"reserved device name in tar member path: {name!r}")
     t, d = (dest / p).resolve(), dest.resolve()
     if d not in t.parents and t != d:
         raise ValueError(f"tar member escapes destination: {name!r}")
     return t
 
 
-def extract_eprint(data: bytes, dest: str | Path) -> str:
+def extract_eprint(data: bytes, dest: str | Path, max_bytes: int = MAX_UNPACKED, max_members: int = MAX_MEMBERS) -> str:
     """Extract an arXiv e-print into dest. Returns "tar", "single_tex" or "no_tex_source".
 
     Raises ValueError on unsafe tars (absolute or `..` paths, symlinks, hardlinks, devices); every member is
-    validated before anything is written. Nothing is executed.
+    validated before anything is written. Nothing is executed. Raises ValueError when the decompressed data or
+    the sum of member sizes exceeds `max_bytes`, or there are more than `max_members` members (decompression bombs).
     """
     dest = Path(dest)
     if data[:4] == b"%PDF":
@@ -96,9 +107,12 @@ def extract_eprint(data: bytes, dest: str | Path) -> str:
     raw = data
     if gz:
         try:
-            raw = gzip.decompress(data)
+            with gzip.GzipFile(fileobj=io.BytesIO(data)) as g:
+                raw = g.read(max_bytes + 1)
         except (OSError, EOFError):
             return "no_tex_source"
+        if len(raw) > max_bytes:
+            raise ValueError(f"decompressed e-print exceeds {max_bytes} bytes")
         if raw[:4] == b"%PDF":
             return "no_tex_source"
     try:
@@ -113,6 +127,10 @@ def extract_eprint(data: bytes, dest: str | Path) -> str:
         return "single_tex"
     with tf:
         members = tf.getmembers()
+        if len(members) > max_members:
+            raise ValueError(f"tar has more than {max_members} members")
+        if sum(m.size for m in members if m.isfile()) > max_bytes or any(m.size > max_bytes for m in members):
+            raise ValueError(f"tar members exceed {max_bytes} bytes")
         for m in members:
             if not (m.isfile() or m.isdir()):
                 raise ValueError(f"unsafe tar member type: {m.name!r}")
