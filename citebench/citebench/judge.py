@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,21 +29,42 @@ from typing import Callable, Optional
 import requests
 
 from .extract import find_cites
-from .fetch import latest_records
+from .fetch import clean_doi, latest_records, norm_title
 from .retrieval import chunk, most_similar, top_passages
-from .units import SourceRecord, Unit, read_jsonl
+from .units import Reference, SourceRecord, Unit, read_jsonl
 
 PROMPT_VERSION = "judge_v1"
 PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / f"{PROMPT_VERSION}.md"
 SHUFFLE_SEED = 20261122  # D19
 OLLAMA_SEED = 20261122
 TOP_K = 5
+NUM_CTX = 16384  # Ollama context window, set explicitly so truncation is detectable
+CLI_SYSTEM_PROMPT = "You are a careful assistant. Answer only with the JSON object requested."
+MODEL_RE = re.compile(r"^[A-Za-z0-9._:" + chr(92) + "-" + chr(92) + "[" + chr(92) + "]]+$")
 CONDITIONS = ("correct", "abstract_only", "no_source", "wrong_related", "shuffled")
 
 SUPPORT = ("supported", "partially_supported", "not_supported", "contradicted", "cannot_check")
 STRENGTH = ("matches", "overstated", "understated")
 OVER_TYPES = ("hedge_dropped", "scope_widened", "causal_from_correlational", "number_changed",
               "certainty_inflated", "other")
+
+
+# ---------------------------------------------------------------- same work
+
+def _arxiv_norm(a: Optional[str]) -> str:
+    return re.sub(r"^arxiv:|v[0-9]+$", "", (a or "").strip().lower())
+
+
+def same_work(a: Optional[Reference], b: Optional[Reference]) -> bool:
+    """Two bibliographic records are the same work if they share a normalized DOI, an arXiv id (version
+    stripped) or a normalized title. A missing record never matches."""
+    if a is None or b is None:
+        return False
+    if a.doi and b.doi and clean_doi(a.doi).lower() == clean_doi(b.doi).lower():
+        return True
+    if _arxiv_norm(a.arxiv_id) and _arxiv_norm(a.arxiv_id) == _arxiv_norm(b.arxiv_id):
+        return True
+    return bool(norm_title(a.title)) and norm_title(a.title) == norm_title(b.title)
 
 
 # ---------------------------------------------------------------- evidence
@@ -61,6 +83,22 @@ class Context:
         self.sources = sources
         self.cache = Path(cache)
         self._text: dict[tuple[str, str], Optional[str]] = {}
+        self.refs: dict[tuple[str, str], Reference] = {}
+        for u in units:
+            if u.reference is not None:
+                self.refs.setdefault((u.survey_id, u.cite_key), u.reference)
+
+    def same_work(self, s1: str, k1: str, s2: str, k2: str) -> bool:
+        return (s1 == s2 and k1 == k2) or same_work(self.refs.get((s1, k1)), self.refs.get((s2, k2)))
+
+    def shuffle_conflict(self, u: Unit, d: Unit) -> Optional[str]:
+        """Why donor d's evidence is not a valid mismatch for u (same work, or identical source text), else None."""
+        if self.same_work(u.survey_id, u.cite_key, d.survey_id, d.cite_key):
+            return "donor cites the same work"
+        hu, hd = (getattr(self.sources.get((x.survey_id, x.cite_key)), "text_sha256", None) for x in (u, d))
+        if hu and hu == hd:
+            return "donor source text is identical"
+        return None
 
     def text(self, survey_id: str, key: str) -> Optional[str]:
         k = (survey_id, key)
@@ -95,11 +133,12 @@ class Context:
         return self.evidence_from(u.sentence_text, u.survey_id, u.cite_key, first_only)
 
     def choose_wrong_related(self, u: Unit) -> Optional[tuple[str, float]]:
-        """D18: same survey, same section preferred, excluding own and cocited keys; highest TF-IDF cosine
+        """D18: same survey, same section preferred, excluding own and cocited keys and
+        any key that is the same work as one of them (DOI, arXiv id or title); highest TF-IDF cosine
         between the candidate's first passage and the citing sentence."""
         banned = {u.cite_key, *u.cocited_keys}
         in_survey = sorted(k for (s, k) in self.sources if s == u.survey_id and k not in banned
-                           and self.text(s, k))
+                           and not any(self.same_work(s, k, s, b) for b in banned) and self.text(s, k))
         same_section = {o.cite_key for o in self.units.values()
                         if o.survey_id == u.survey_id and u.section is not None and o.section == u.section}
         pool = [k for k in in_survey if k in same_section] or in_survey
@@ -109,36 +148,44 @@ class Context:
         return most_similar(u.sentence_text, cands)[0]
 
 
-def derange(units: list[Unit], seed: int = SHUFFLE_SEED) -> tuple[dict[str, str], list[str]]:
-    """Seeded assignment unit_id -> donor unit_id, each unit used as a donor once, donors from a different survey.
-    If impossible for some units (e.g. a single survey), the nearest valid assignment is used (a different unit
-    from the same survey; itself only when it is the last choice) and a warning is returned."""
+def derange(units: list[Unit], seed: int = SHUFFLE_SEED,
+            conflict: Optional[Callable[[Unit, Unit], Optional[str]]] = None) -> tuple[dict[str, str], list[str]]:
+    """Seeded assignment unit_id -> donor unit_id, each unit used as a donor once. A valid donor is from a different
+    survey and, if `conflict(unit, donor)` is given, has no conflict (same work, identical source text). If that is
+    impossible for some units, the nearest assignment is used (a different unit; itself only as the last choice) and
+    a warning is returned; callers flag the affected calls."""
     ids = sorted(u.unit_id for u in units)
+    by_id = {u.unit_id: u for u in units}
     survey = {u.unit_id: u.survey_id for u in units}
+
+    def valid(u, d):
+        return survey[d] != survey[u] and not (conflict and conflict(by_id[u], by_id[d]))
+
     best, best_score = {}, None
     for attempt in range(200):
         rng = random.Random(f"{seed}:{attempt}")
         order, free = ids[:], ids[:]
         rng.shuffle(order)
         rng.shuffle(free)
-        assign, same_survey, selfs = {}, 0, 0
+        assign, invalid, selfs = {}, 0, 0
         for u in order:
-            pick = next((d for d in free if survey[d] != survey[u]), None)
+            pick = next((d for d in free if d != u and valid(u, d)), None)
             if pick is None:
-                same_survey += 1
+                invalid += 1
                 pick = next((d for d in free if d != u), None)
                 if pick is None:
                     pick, selfs = u, selfs + 1
             free.remove(pick)
             assign[u] = pick
-        score = (selfs, same_survey)
+        score = (selfs, invalid)
         if best_score is None or score < best_score:
             best, best_score = assign, score
-        if score == (0, 0) or (len(set(survey.values())) < 2 and selfs == 0):
+        if score == (0, 0) or (len(set(survey.values())) < 2 and selfs == 0 and conflict is None):
             break
     warnings = []
     if best_score and best_score[1]:
-        warnings.append(f"shuffled: {best_score[1]} of {len(ids)} units could not get a donor from a different survey")
+        warnings.append(f"shuffled: {best_score[1]} of {len(ids)} units could not get a valid donor "
+                        "(different survey, different work, different source text)")
     if best_score and best_score[0]:
         warnings.append(f"shuffled: {best_score[0]} unit(s) are assigned their own evidence (too few units)")
     return best, warnings
@@ -179,7 +226,11 @@ def template_sha256() -> str:
 def target_sentence(u: Unit) -> str:
     """sentence_text with [CITE] kept only on the citation command(s) holding u.cite_key; other commands become
     [OTHER]. Commands are re-parsed from sentence_latex in the order the extractor replaced them. If the counts do
-    not line up (e.g. a cite command inside a LaTeX comment), the text is returned unchanged."""
+    not line up (e.g. a cite command inside a LaTeX comment), the text is returned unchanged. Text that already
+    contains [OTHER] is returned unchanged too: planted copies (planted.py) store the masked, edited text and keep
+    the original LaTeX, which no longer matches it."""
+    if "[OTHER]" in u.sentence_text:
+        return u.sentence_text
     cmds = [ks for _, _, cmd, ks in find_cites(u.sentence_latex) if cmd != "nocite"]
     pieces = u.sentence_text.split("[CITE]")
     if len(pieces) - 1 != len(cmds) or not any(u.cite_key in ks for ks in cmds):
@@ -221,7 +272,7 @@ def build_calls(ctx: Context, units: list[Unit], conditions: list[str]) -> tuple
         skipped = len(units) - len(eligible)
         if skipped:
             warnings.append(f"shuffled: {skipped} unit(s) skipped (no own source text to act as donor)")
-        donors, w = derange(eligible)
+        donors, w = derange(eligible, conflict=ctx.shuffle_conflict)
         warnings += w
     calls = []
     for u in units:
@@ -236,10 +287,15 @@ def build_calls(ctx: Context, units: list[Unit], conditions: list[str]) -> tuple
             elif cond == "shuffled":
                 if u.unit_id not in donors:
                     continue
-                d = ctx.units[donors[u.unit_id]] if donors[u.unit_id] in ctx.units else None
+                d = ctx.units.get(donors[u.unit_id])
                 meta = {"donor_unit_id": donors[u.unit_id]}
-                if d is not None and d.survey_id == u.survey_id:
-                    meta["warning"] = "donor from the same survey"
+                reason = None
+                if donors[u.unit_id] == u.unit_id:
+                    reason = "donor is the unit itself"
+                elif d is not None:
+                    reason = "donor from the same survey" if d.survey_id == u.survey_id else ctx.shuffle_conflict(u, d)
+                if reason:
+                    meta["shuffle_warning"] = reason
             ev = evidence_for(ctx, u, cond, meta)
             ev.meta.update(meta)
             calls.append({"call_id": make_call_id(u.unit_id, cond), "unit_id": u.unit_id, "condition": cond,
@@ -284,7 +340,9 @@ def parse_reply(text: str) -> dict:
     conf = obj.get("confidence")
     if isinstance(conf, str) and conf.strip() in ("1", "2", "3"):
         conf = int(conf)
-    if isinstance(conf, bool) or conf not in (1, 2, 3):
+    elif isinstance(conf, float) and conf.is_integer():
+        conf = int(conf)  # 2.0 is stored as 2
+    if isinstance(conf, bool) or not isinstance(conf, int) or conf not in (1, 2, 3):
         out["error"] = f"invalid_confidence: {conf!r}"
         return out
     strength, types = None, []
@@ -321,26 +379,38 @@ class Pending(Exception):
 
 class ClaudeCLIBackend:
     """Runs `claude -p` with no tools. Needs a logged-in Claude Code CLI on PATH. The prompt goes through stdin
-    because prompts can exceed argv length limits."""
+    because prompts can exceed argv length limits.
+
+    Isolation: empty working directory, `--setting-sources ""` (no user, project or local settings), a neutral
+    `--system-prompt`, no tools, no MCP, no session persistence. NOT verified: that user-level memory files
+    (~/.claude/CLAUDE.md, auto-memory) stay out of the context; the CLI login was expired when this was written,
+    so no real call could be inspected. Check the first real run before trusting it. `--bare` would skip memory
+    but needs ANTHROPIC_API_KEY, so it is not used. The full argv (without the prompt) is stored in model_meta."""
 
     def __init__(self, model: str, timeout: float = 600):
+        if not MODEL_RE.fullmatch(model or "") or model.startswith("-"):
+            raise ValueError(f"invalid model name {model!r}")
         self.model, self.timeout = model, timeout
 
     def complete(self, prompt: str, call_id: Optional[str] = None) -> tuple[str, dict]:
         cmd = [shutil.which("claude") or "claude", "-p", "--model", self.model, "--tools", "",
-               "--strict-mcp-config", "--no-session-persistence", "--output-format", "json"]
+               "--strict-mcp-config", "--no-session-persistence", "--output-format", "json",
+               "--setting-sources", "", "--system-prompt", CLI_SYSTEM_PROMPT]
         try:
-            r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8",
-                               timeout=self.timeout)
+            with tempfile.TemporaryDirectory(prefix="citebench_cli_") as cwd:
+                r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8",
+                                   timeout=self.timeout, cwd=cwd)
         except subprocess.TimeoutExpired:
-            raise BackendError(f"timeout after {self.timeout}s")
+            raise BackendError(f"timeout after {self.timeout}s", {"argv": cmd})
         except OSError as e:
-            raise BackendError(f"cannot run claude: {e}")
+            raise BackendError(f"cannot run claude: {e}", {"argv": cmd})
         try:
             d = json.loads(r.stdout)
         except ValueError:
-            raise BackendError(f"unparseable CLI output (exit {r.returncode}): {(r.stderr or r.stdout)[:500]}")
-        meta = {"model_ids": sorted((d.get("modelUsage") or {}).keys()), "duration_ms": d.get("duration_ms")}
+            raise BackendError(f"unparseable CLI output (exit {r.returncode}): {(r.stderr or r.stdout)[:500]}",
+                               {"argv": cmd})
+        meta = {"model_ids": sorted((d.get("modelUsage") or {}).keys()), "duration_ms": d.get("duration_ms"),
+                "argv": cmd}
         if d.get("is_error") or r.returncode != 0:
             raise BackendError(f"cli_error: {str(d.get('result'))[:500]}", meta)
         return d.get("result") or "", meta
@@ -366,7 +436,8 @@ class OllamaBackend:
 
     def complete(self, prompt: str, call_id: Optional[str] = None) -> tuple[str, dict]:
         body = {"model": self.model, "messages": [{"role": "user", "content": prompt}], "stream": False,
-                "format": "json", "options": {"temperature": 0, "seed": OLLAMA_SEED}}
+                "format": "json",
+                "options": {"temperature": 0, "seed": OLLAMA_SEED, "num_ctx": NUM_CTX}}
         try:
             r = requests.post(f"{self.url}/api/chat", json=body, timeout=self.timeout)
             r.raise_for_status()
@@ -375,7 +446,10 @@ class OllamaBackend:
             raise BackendError(f"ollama_error: {e}")
         meta = {"model": self.model, "digest": self._model_digest(), "temperature": 0, "seed": OLLAMA_SEED,
                 "eval_count": d.get("eval_count"), "prompt_eval_count": d.get("prompt_eval_count"),
-                "total_duration": d.get("total_duration")}
+                "total_duration": d.get("total_duration"), "num_ctx": NUM_CTX}
+        used = d.get("prompt_eval_count")
+        if isinstance(used, int) and used >= NUM_CTX - 16:
+            raise BackendError(f"context_truncated: prompt_eval_count={used} num_ctx={NUM_CTX}", meta)
         return (d.get("message") or {}).get("content") or "", meta
 
 

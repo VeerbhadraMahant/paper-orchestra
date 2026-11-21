@@ -108,7 +108,7 @@ def test_shuffled_single_survey_falls_back_with_warning(tmp_path):
     d, w = derange(units)
     assert w and all(k != v for k, v in d.items())
     calls, warnings = build_calls(ctx, units, ["shuffled"])
-    assert warnings and all(c["evidence"].get("warning") for c in calls)
+    assert warnings and all(c["evidence"].get("shuffle_warning") for c in calls)
 
 
 def test_build_skips_shuffled_units_without_donor_text(tmp_path):
@@ -311,3 +311,98 @@ def test_target_sentence_marks_only_the_target_command():
     assert target_sentence(mk("b", r"X \cite{a,b}.", "X [CITE].")) == "X [CITE]."
     # counts do not line up: unchanged
     assert target_sentence(mk("a", r"A \cite{a}.", "A [CITE] [CITE].")) == "A [CITE] [CITE]."
+
+
+# ---- review fixes
+
+def test_parse_confidence_integral_float_and_bool():
+    r = parse_reply(json.dumps({**GOOD, "confidence": 2.0}))
+    assert r["error"] is None and r["confidence"] == 2 and isinstance(r["confidence"], int)
+    for bad in (2.5, True, False, None, [2], 4.0):
+        assert parse_reply(json.dumps({**GOOD, "confidence": bad}))["error"]
+
+
+def test_wrong_related_excludes_same_work_under_other_key(tmp_path):
+    ctx, units = make_world(tmp_path)
+    # key "d" is the same paper as the unit's own key "a" (duplicate bib entry, same DOI, different title text)
+    ctx.refs[("S1", "a")] = Reference(key="a", title="Paper A", doi="https://doi.org/10.1/X")
+    ctx.refs[("S1", "d")] = Reference(key="d", title="Other spelling", doi="10.1/x")
+    # key "c" has the same arXiv id as the cocited key "b"
+    ctx.refs[("S1", "b")] = Reference(key="b", title="Paper B", arxiv_id="2401.00001v2")
+    ctx.refs[("S1", "c")] = Reference(key="c", title="Different", arxiv_id="arXiv:2401.00001")
+    assert ctx.choose_wrong_related(units[0]) is None  # only a, b, c, d have text; all are the same work as a or b
+    ctx.refs[("S1", "c")] = Reference(key="c", title="Paper A")  # same normalized title as a
+    assert ctx.choose_wrong_related(units[0]) is None
+    ctx.refs[("S1", "c")] = Reference(key="c", title="Unrelated")
+    assert ctx.choose_wrong_related(units[0])[0] == "c"
+
+
+def test_same_work_rules():
+    R = Reference
+    assert judge.same_work(R(key="x", doi="doi:10.1/A"), R(key="y", doi="10.1/a"))
+    assert judge.same_work(R(key="x", arxiv_id="1234.5678v1"), R(key="y", arxiv_id="arXiv:1234.5678v3"))
+    assert judge.same_work(R(key="x", title="A {Good} Title!"), R(key="y", title="a good title"))
+    assert not judge.same_work(R(key="x", title=""), R(key="y", title=""))
+    assert not judge.same_work(None, R(key="y", title="t"))
+
+
+def test_shuffled_avoids_same_work_and_same_text_donors(tmp_path):
+    ctx, units = make_world(tmp_path)
+    for s in ("S1", "S2"):
+        ctx.sources[(s, "a")].text_sha256 = "h-a"
+    d, w = derange(units, conflict=ctx.shuffle_conflict)
+    by_id = {u.unit_id: u for u in units}
+    assert not w
+    for k, v in d.items():
+        assert by_id[k].survey_id != by_id[v].survey_id
+        assert ctx.shuffle_conflict(by_id[k], by_id[v]) is None
+    # S1-u1 (key a) can never take S2-u1 (key a): same work and same text
+    assert d["S1-u1"] != "S2-u1"
+
+
+def test_shuffled_flags_unavoidable_conflict_per_call(tmp_path):
+    ctx, units = make_world(tmp_path)
+    units = [u for u in units if u.unit_id in ("S1-u1", "S2-u1")]  # both cite key a: no valid donor exists
+    calls, warnings = build_calls(ctx, units, ["shuffled"])
+    assert warnings and all("shuffle_warning" in c["evidence"] for c in calls)
+    assert all("same work" in c["evidence"]["shuffle_warning"] for c in calls)
+
+
+def test_claude_cli_isolation_args_cwd_and_model_validation(tmp_path):
+    ok = json.dumps({"result": "hi", "is_error": False})
+    with mock.patch("subprocess.run", return_value=cp(ok)) as run:
+        _, meta = ClaudeCLIBackend("haiku").complete("PROMPT")
+    argv = run.call_args.args[0]
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert argv[argv.index("--system-prompt") + 1] == judge.CLI_SYSTEM_PROMPT
+    assert meta["argv"] == argv and "PROMPT" not in argv
+    cwd = run.call_args.kwargs["cwd"]
+    assert cwd and not __import__("os").path.exists(cwd)  # a fresh temp dir, removed afterwards
+    for bad in ("haiku --foo", "a b", "x;rm", "", "--help", "m\n"):
+        with pytest.raises(ValueError):
+            ClaudeCLIBackend(bad)
+    assert ClaudeCLIBackend("claude-opus-4.5:x[1m]")
+
+
+def test_ollama_context_truncation_is_an_error():
+    def chat(n):
+        c = mock.Mock(json=lambda: {"message": {"content": "{}"}, "prompt_eval_count": n})
+        c.raise_for_status = lambda: None
+        return c
+    with mock.patch("requests.get", side_effect=__import__("requests").ConnectionError()):
+        with mock.patch("requests.post", return_value=chat(100)) as post:
+            _, meta = OllamaBackend("m").complete("P")
+        assert post.call_args.kwargs["json"]["options"]["num_ctx"] == 16384
+        assert meta["prompt_eval_count"] == 100 and meta["num_ctx"] == 16384
+        with mock.patch("requests.post", return_value=chat(16384 - 16)):
+            with pytest.raises(BackendError, match="context_truncated") as ei:
+                OllamaBackend("m").complete("P")
+        assert ei.value.meta["prompt_eval_count"] == 16384 - 16
+
+
+def test_target_sentence_keeps_masked_text_with_other():
+    from citebench.judge import target_sentence
+    u = Unit(unit_id="u", survey_id="s", source_file="f", char_start=0, char_end=1, section=None,
+             sentence_latex=r"A \cite{a} beats B \citep{b}.", sentence_text="A [CITE] beats B [OTHER].",
+             cite_key="a")
+    assert target_sentence(u) == "A [CITE] beats B [OTHER]."
