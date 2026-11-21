@@ -12,7 +12,7 @@ A human-labeled benchmark of citations from published literature surveys, used t
 - **RQ2 Memory reliance.** Do LLM judges still say "supported" when given no source, or the wrong source? If yes, their verdicts partly come from memory, not evidence.
 - **RQ3 Overclaiming.** Can checkers detect a sentence that is stronger or broader than its source (dropped hedge, widened scope, causal from correlational)?
 - **RQ4 Evidence access.** How much accuracy is lost with abstract only vs full text?
-- **RQ5 (optional, later).** Unsupported-citation rate in human-written surveys vs AI-written ones.
+- **RQ5 (out of scope for v1, future work).** Unsupported-citation rate in human-written surveys vs AI-written ones. No experiment in v1 tests it.
 
 ## 3. Why this is new (prior work checked 2026-11-21, abstracts/READMEs only)
 
@@ -37,7 +37,7 @@ Our gap: human-labeled survey citations, an explicit memory-reliance test, and s
 ### 4.2 Units
 - One unit = (citing sentence, one cited reference, retrieved source text, source access level).
 - Multi-cite sentences are split per reference.
-- Stratified sample by citation role (evidence, method, context) so that "context" cites do not dominate.
+- Stratified sample by citation role, with the six annotation roles merged into three sampling strata: evidence (evidence, contrast), method (method, dataset_or_tool), context (context_or_background, attribution_of_idea). Quotas: evidence 80, method 60, context 60 (D8). Strata come from a provisional sentence-only classifier; the annotator's own role label is the one analysed.
 
 ### 4.3 Labels
 - **Support:** supported / partially supported / not supported / contradicted / cannot check (source unavailable).
@@ -54,7 +54,7 @@ Our gap: human-labeled survey citations, an explicit memory-reliance test, and s
 - Rough effort (estimate, to be measured in the pilot): several minutes per unit, since each needs the source read.
 
 ### 4.5 Planted set
-- Take human-confirmed "supported" units and perturb them in controlled ways: wrong paper swapped in, number changed, hedge removed, scope widened, negation. About 40 to 50 per type.
+- Take human-confirmed "supported" units (strength matches, confidence at least 2) and perturb them in controlled ways. Six types: wrong paper swapped in, number changed, hedge dropped, scope widened, negation, causal claim from a correlational source (the last only where the source reports an association). Target 40 per type; a unit may be reused across types, and extra units labeled under the same guidelines are flagged supplementary if fewer than 40 are eligible (D13, D14).
 - Ground truth is known by construction, so this set is cheap and large.
 
 ### 4.6 Release and copyright
@@ -90,7 +90,7 @@ Our gap: human-labeled survey citations, an explicit memory-reliance test, and s
 
 ## 8. Milestones (rough estimates, to be revised after the pilot)
 
-1. Guidelines + extractor + fetcher; pilot 30 dev units with two annotators.
+1. Guidelines + extractor + fetcher; pilot 30 dev units, labeled by the author, and independently by a second annotator if one is available (G4).
 2. Full 200-unit annotation + planted set.
 3. Run E1 to E5.
 4. Write-up (workshop paper or tech report) and release.
