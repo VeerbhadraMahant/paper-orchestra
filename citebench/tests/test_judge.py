@@ -293,3 +293,21 @@ def test_cli_build_and_run(tmp_path, capsys):
     assert judge.main(["run", *base, "--calls", str(tmp_path / "c.jsonl"), "--backend", "file", "--model", "m",
                        "--dir", str(tmp_path / "fd"), "--out", str(tmp_path / "p.jsonl")]) == 0
     assert "pending=" in capsys.readouterr().out
+
+
+def test_target_sentence_marks_only_the_target_command():
+    from citebench.judge import target_sentence
+    from citebench.units import Unit
+
+    def mk(key, latex, text):
+        return Unit(unit_id="u", survey_id="s", source_file="f", char_start=0, char_end=1, section=None,
+                    sentence_latex=latex, sentence_text=text, cite_key=key)
+
+    latex = r"A \cite{a} beats B \citep{b,c}."
+    text = "A [CITE] beats B [CITE]."
+    assert target_sentence(mk("a", latex, text)) == "A [CITE] beats B [OTHER]."
+    assert target_sentence(mk("c", latex, text)) == "A [OTHER] beats B [CITE]."
+    # one command holding several keys stays a single [CITE]
+    assert target_sentence(mk("b", r"X \cite{a,b}.", "X [CITE].")) == "X [CITE]."
+    # counts do not line up: unchanged
+    assert target_sentence(mk("a", r"A \cite{a}.", "A [CITE] [CITE].")) == "A [CITE] [CITE]."

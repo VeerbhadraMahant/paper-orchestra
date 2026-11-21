@@ -4,7 +4,7 @@ You are checking one citation in a scientific literature survey. You will see a 
 
 - Use ONLY the evidence text below. Do not use what you remember about the cited paper or the field. If you know the paper says something that is not in the evidence, the label follows the evidence.
 - The evidence is a selection of passages, not the whole paper. Absence of a claim from an abstract or from the passages shown is not evidence that the paper does not support it: in that case answer cannot_check, not not_supported.
-- Judge only the part of the sentence that is attributed to the reference marked [CITE]. Other references cited in the same sentence ("cocited" below) must not be used to settle your answer.
+- Judge only the part of the sentence that is attributed to the reference marked [CITE]. Citations to other references in the same sentence are marked [OTHER]; these, and any other references cited together with this one ("cocited" below), must not be used to settle your answer.
 - Do not guess. If the evidence is missing or does not address the claim, say so with cannot_check.
 
 ## Support label (choose exactly one)

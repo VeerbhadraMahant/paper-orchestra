@@ -27,6 +27,7 @@ from typing import Callable, Optional
 
 import requests
 
+from .extract import find_cites
 from .fetch import latest_records
 from .retrieval import chunk, most_similar, top_passages
 from .units import SourceRecord, Unit, read_jsonl
@@ -175,13 +176,27 @@ def template_sha256() -> str:
     return hashlib.sha256(PROMPT_PATH.read_bytes()).hexdigest()
 
 
+def target_sentence(u: Unit) -> str:
+    """sentence_text with [CITE] kept only on the citation command(s) holding u.cite_key; other commands become
+    [OTHER]. Commands are re-parsed from sentence_latex in the order the extractor replaced them. If the counts do
+    not line up (e.g. a cite command inside a LaTeX comment), the text is returned unchanged."""
+    cmds = [ks for _, _, cmd, ks in find_cites(u.sentence_latex) if cmd != "nocite"]
+    pieces = u.sentence_text.split("[CITE]")
+    if len(pieces) - 1 != len(cmds) or not any(u.cite_key in ks for ks in cmds):
+        return u.sentence_text
+    out = [pieces[0]]
+    for ks, rest in zip(cmds, pieces[1:]):
+        out += ["[CITE]" if u.cite_key in ks else "[OTHER]", rest]
+    return "".join(out)
+
+
 def render_prompt(u: Unit, ev: Evidence) -> str:
     if ev.parts:
         block = "\n\n".join(f"[{label}]\n{text}" for label, text in ev.parts)
     else:
         block = "(No source text is available for this reference.)"
     title = (u.reference.title if u.reference and u.reference.title else None) or "(unknown)"
-    vals = {"sentence": u.sentence_text, "title": title, "cocited_count": str(len(u.cocited_keys)),
+    vals = {"sentence": target_sentence(u), "title": title, "cocited_count": str(len(u.cocited_keys)),
             "evidence": block}
     # one pass, so placeholder-like text inside the evidence is never substituted
     return re.sub(r"\{\{(sentence|title|cocited_count|evidence)\}\}", lambda m: vals[m.group(1)], template())
