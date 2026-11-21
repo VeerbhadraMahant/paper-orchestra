@@ -1,0 +1,222 @@
+[
+ {
+  "arxiv_id": "2402.06196",
+  "title": "Large Language Models: A Survey",
+  "first_author": "Shervin Minaee",
+  "year": 2024,
+  "subfield": "LLM",
+  "license": "CC BY 4.0",
+  "ref_count": 241,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2303.18223",
+  "title": "A Survey of Large Language Models",
+  "first_author": "Wayne Xin Zhao",
+  "year": 2023,
+  "subfield": "LLM",
+  "license": "arXiv non-exclusive",
+  "ref_count": 461,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2212.09597",
+  "title": "Reasoning with Language Model Prompting: A Survey",
+  "first_author": "Shuofei Qiao",
+  "year": 2022,
+  "subfield": "LLM",
+  "license": "arXiv non-exclusive",
+  "ref_count": 218,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2412.10400",
+  "title": "Reinforcement Learning Enhanced LLMs: A Survey",
+  "first_author": "Shuhe Wang",
+  "year": 2024,
+  "subfield": "LLM",
+  "license": "CC BY-NC-SA 4.0",
+  "ref_count": 110,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2208.04309",
+  "title": "3D Vision with Transformers: A Survey",
+  "first_author": "Jean Lahoud",
+  "year": 2022,
+  "subfield": "CV",
+  "license": "CC BY 4.0",
+  "ref_count": 185,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2206.09328",
+  "title": "A Survey on Model-based Reinforcement Learning",
+  "first_author": "Fan-Ming Luo",
+  "year": 2022,
+  "subfield": "RL",
+  "license": "CC BY 4.0",
+  "ref_count": 191,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2209.00796",
+  "title": "Diffusion Models: A Comprehensive Survey of Methods and Applications",
+  "first_author": "Ling Yang",
+  "year": 2022,
+  "subfield": "Generative",
+  "license": "arXiv non-exclusive",
+  "ref_count": 394,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2409.19365",
+  "title": "Conditional Image Synthesis with Diffusion Models: A Survey",
+  "first_author": "Zheyuan Zhan",
+  "year": 2024,
+  "subfield": "Generative",
+  "license": "CC BY 4.0",
+  "ref_count": 257,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2507.16869",
+  "title": "Controllable Video Generation: A Survey",
+  "first_author": "Yue Ma",
+  "year": 2025,
+  "subfield": "Generative",
+  "license": "arXiv non-exclusive",
+  "ref_count": 305,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2203.15935",
+  "title": "Graph Neural Networks in IoT: A Survey",
+  "first_author": "Guimin Dong",
+  "year": 2022,
+  "subfield": "GNN",
+  "license": "CC BY-NC-ND 4.0",
+  "ref_count": 344,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2202.07082",
+  "title": "Graph Neural Networks for Graphs with Heterophily: A Survey",
+  "first_author": "Xin Zheng",
+  "year": 2022,
+  "subfield": "GNN",
+  "license": "arXiv non-exclusive",
+  "ref_count": 169,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2204.08570",
+  "title": "A Comprehensive Survey on Trustworthy Graph Neural Networks: Privacy, Robustness, Fairness, and Explainability",
+  "first_author": "Enyan Dai",
+  "year": 2022,
+  "subfield": "GNN",
+  "license": "arXiv non-exclusive",
+  "ref_count": 258,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2302.10637",
+  "title": "A Survey of Trustworthy Federated Learning with Perspectives on Security, Robustness, and Privacy",
+  "first_author": "Yifei Zhang",
+  "year": 2023,
+  "subfield": "Privacy/security",
+  "license": "arXiv non-exclusive",
+  "ref_count": 275,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2307.15838",
+  "title": "Holistic Survey of Privacy and Fairness in Machine Learning",
+  "first_author": "Sina Shaham",
+  "year": 2023,
+  "subfield": "Privacy/fairness",
+  "license": "CC BY 4.0",
+  "ref_count": null,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2402.09748",
+  "title": "Model Compression and Efficient Inference for Large Language Models: A Survey",
+  "first_author": "Wenxiao Wang",
+  "year": 2024,
+  "subfield": "Efficient ML",
+  "license": "arXiv non-exclusive",
+  "ref_count": 368,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2401.00625",
+  "title": "Beyond Efficiency: A Systematic Survey of Resource-Efficient Large Language Models",
+  "first_author": "Guangji Bai",
+  "year": 2024,
+  "subfield": "Efficient ML",
+  "license": "arXiv non-exclusive",
+  "ref_count": 245,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2405.00314",
+  "title": "Model Quantization and Hardware Acceleration for Vision Transformers: A Comprehensive Survey",
+  "first_author": "Dayou Du",
+  "year": 2024,
+  "subfield": "Efficient ML",
+  "license": "arXiv non-exclusive",
+  "ref_count": 83,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2306.13549",
+  "title": "A Survey on Multimodal Large Language Models",
+  "first_author": "Shukang Yin",
+  "year": 2023,
+  "subfield": "Multimodal",
+  "license": "CC BY 4.0",
+  "ref_count": 251,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2405.10739",
+  "title": "Efficient Multimodal Large Language Models: A Survey",
+  "first_author": "Yizhang Jin",
+  "year": 2024,
+  "subfield": "Multimodal",
+  "license": "arXiv non-exclusive",
+  "ref_count": 227,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2411.15296",
+  "title": "MME-Survey: A Comprehensive Survey on Evaluation of Multimodal LLMs",
+  "first_author": "Chaoyou Fu",
+  "year": 2024,
+  "subfield": "Multimodal",
+  "license": "arXiv non-exclusive",
+  "ref_count": null,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2502.05151",
+  "title": "Transforming Science with Large Language Models: A Survey on AI-assisted Scientific Discovery, Experimentation, Content Generation, and Evaluation",
+  "first_author": "Steffen Eger",
+  "year": 2025,
+  "subfield": "AI for science",
+  "license": "CC BY 4.0",
+  "ref_count": 335,
+  "venue": null
+ },
+ {
+  "arxiv_id": "2508.14111",
+  "title": "From AI for Science to Agentic Science: A Survey on Autonomous Scientific Discovery",
+  "first_author": "Jiaqi Wei",
+  "year": 2025,
+  "subfield": "AI for science",
+  "license": "arXiv non-exclusive",
+  "ref_count": null,
+  "venue": null
+ }
+]
