@@ -227,3 +227,100 @@ def test_cli_duplicate_gold_rejected(tmp_path):
     _write(pred, [{"unit_id": "a", "judge": "j", "support": S}])
     with pytest.raises(ValueError):
         ev.evaluate_files(str(gold), str(pred))
+
+
+# CLI wiring: calibration, McNemar, Holm, E3 ------------------------------------
+
+def _gold_pred(tmp_path, gold_rows, pred_rows):
+    g, p = tmp_path / "g.jsonl", tmp_path / "p.jsonl"
+    _write(g, gold_rows)
+    _write(p, pred_rows)
+    return str(g), str(p)
+
+
+def test_calibration_present_and_absent(tmp_path):
+    g, p = _gold_pred(
+        tmp_path,
+        [{"unit_id": f"u{i}", "support": s} for i, s in enumerate([S, S, N, N])],
+        [{"unit_id": "u0", "judge": "a", "support": S, "confidence": 3},   # right, p=.95, y=1
+         {"unit_id": "u1", "judge": "a", "support": N, "confidence": 1},   # wrong, p=.5, y=1
+         {"unit_id": "u2", "judge": "a", "support": N, "confidence": 3},   # right, p=.05, y=0
+         {"unit_id": "u3", "judge": "a", "support": N},                    # no confidence
+         {"unit_id": "u0", "judge": "b", "support": S}, {"unit_id": "u1", "judge": "b", "support": S}],
+    )
+    res, _ = ev.evaluate_files(g, p, n_boot=10)
+    cal = res[("a", None)]["calibration"]
+    assert cal["n"] == 3
+    # level 3: 2 right of 2 -> |1-.95|=.05, weight 2/3; level 1: 0 of 1 -> |0-.5|=.5, weight 1/3
+    assert cal["ece"] == pytest.approx(2 / 3 * 0.05 + 1 / 3 * 0.5)
+    assert cal["brier"] == pytest.approx((0.05**2 + 0.5**2 + 0.05**2) / 3)
+    assert res[("b", None)]["calibration"] is None
+    out = ev.format_report(res)
+    assert "calibration (n=3): ECE=" in out and "calibration: not available" in out
+
+
+def test_mcnemar_pair_known_counts(tmp_path):
+    gold = [{"unit_id": f"u{i}", "support": S} for i in range(8)]
+    a = [S] * 8                      # a correct everywhere
+    b = [N] * 6 + [S, S]             # b wrong on u0..u5 -> a-only=6, b-only=0
+    rows = [{"unit_id": f"u{i}", "judge": j, "support": s}
+            for j, preds in (("a", a), ("b", b)) for i, s in enumerate(preds)]
+    rows.append({"unit_id": "u7", "judge": "c", "support": S})  # c scored one unit only
+    g, p = _gold_pred(tmp_path, gold, rows)
+    r = ev.compare_judges(g, p)
+    ab = next(x for x in r if (x["judge_a"], x["judge_b"]) == ("a", "b"))
+    assert (ab["n"], ab["a_only_correct"], ab["b_only_correct"]) == (8, 6, 0)
+    assert ab["p"] == pytest.approx(2 / 64)  # exact binomial, b+c=6
+    ac = next(x for x in r if (x["judge_a"], x["judge_b"]) == ("a", "c"))
+    assert ac["n"] == 1  # only units both scored
+
+
+def test_holm_across_three_comparisons(tmp_path):
+    gold = [{"unit_id": f"u{i}", "support": S} for i in range(8)]
+    rows = []
+    for j, preds in (("a", [S] * 8), ("b", [N] * 6 + [S, S]), ("c", [N] * 2 + [S] * 6)):
+        rows += [{"unit_id": f"u{i}", "judge": j, "support": s} for i, s in enumerate(preds)]
+    g, p = _gold_pred(tmp_path, gold, rows)
+    r = ev.compare_judges(g, p)
+    by = {(x["judge_a"], x["judge_b"]): x for x in r}
+    assert len(r) == 3
+    # a-b: 6 vs 0 discordant, p=2/64; a-c: 2 vs 0, p=0.5; b-c: 4 vs 0, p=2/16
+    assert by[("a", "b")]["p"] == pytest.approx(2 / 64)
+    assert by[("a", "c")]["p"] == pytest.approx(0.5)
+    assert by[("b", "c")]["p"] == pytest.approx(2 / 16)
+    # Holm: sorted p = 1/32 (x3), 1/8 (x2), 0.5 (x1), then running max
+    assert by[("a", "b")]["p_holm"] == pytest.approx(3 / 32)
+    assert by[("b", "c")]["p_holm"] == pytest.approx(0.25)
+    assert by[("a", "c")]["p_holm"] == pytest.approx(0.5)
+
+
+def test_e3_pairs_shared_units_and_d25(tmp_path):
+    gold_rows = [{"unit_id": f"u{i}", "support": S, "access_level": al}
+                 for i, al in enumerate(["full_text", "full_text", "full_text", "abstract", "full_text"])]
+    pred = []
+    for i, (ab, co) in enumerate([(N, S), (S, S), (N, S), (N, S), (S, S)]):
+        pred.append({"unit_id": f"u{i}", "judge": "j", "condition": "abstract_only", "support": ab})
+        if i != 4:  # u4 has no 'correct' prediction: not shared
+            pred.append({"unit_id": f"u{i}", "judge": "j", "condition": "correct", "support": co})
+    g, p = _gold_pred(tmp_path, gold_rows, pred)
+    r = ev.e3_files(g, p, n_boot=20)[0]
+    # shared u0..u3, u3 excluded (abstract) -> n=3; abstract_only right on u1 only, correct right on all
+    assert (r["n"], r["n_excluded"], r["exclusion_applied"]) == (3, 1, True)
+    assert r["acc_abstract_only"] == pytest.approx(1 / 3) and r["acc_correct"] == 1.0
+    assert r["diff"][0] == pytest.approx(-2 / 3)
+    assert (r["abstract_only_right"], r["correct_right"]) == (0, 2)
+    assert r["p"] == pytest.approx(0.5)
+
+
+def test_e3_without_access_field_notes_it(tmp_path, capsys):
+    g, p = _gold_pred(
+        tmp_path, [{"unit_id": "u0", "support": S}],
+        [{"unit_id": "u0", "judge": "j", "condition": "abstract_only", "support": S},
+         {"unit_id": "u0", "judge": "j", "condition": "correct", "support": S}])
+    out_json = tmp_path / "o.json"
+    assert ev.main(["--gold", g, "--pred", p, "--by", "condition", "--n-boot", "10",
+                    "--e3", "--compare", "--json", str(out_json)]) == 0
+    out = capsys.readouterr().out
+    assert "could not be applied" in out and "E3 judge=j: n=1 excluded=0" in out
+    data = json.loads(out_json.read_text())
+    assert {"results", "e3", "compare"} <= set(data)

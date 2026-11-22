@@ -15,6 +15,7 @@ Benchmark and study of citation claim-support checking. See `DESIGN.md` for the 
 ```
 python -m citebench.extract <arxiv_source_dir> --survey-id <arxiv_id> --out units.jsonl
 python -m citebench.fetch units.jsonl --out sources.jsonl --cache .cache/citebench
+python -m citebench.evaluate --gold gold.jsonl --pred preds.jsonl --by condition [--compare] [--e3] [--json out.json]
 ```
 
 ## Run tests
