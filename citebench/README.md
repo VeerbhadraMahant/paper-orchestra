@@ -39,7 +39,7 @@ python -m citebench.annotate reliability --a gold_a.jsonl --b gold_b.jsonl --out
 python -m citebench.planted eligible --labels gold.jsonl --units units.jsonl
 python -m citebench.planted template --labels gold.jsonl --units units.jsonl --out template.json --all-eligible
 python -m citebench.planted build --template template.json --units units.jsonl --out planted.jsonl
-python -m citebench.evaluate --gold gold.jsonl --pred preds.jsonl
+python -m citebench.evaluate --gold gold.jsonl --pred preds.jsonl --by condition [--compare] [--e3] [--json out.json]
 python -m citebench.report coverage --units units.jsonl --sources sources.jsonl [--json out.json]
 python -m citebench.checks wrong-pairs export --calls calls.jsonl --units units.jsonl --sources sources.jsonl --cache .cache/citebench --n 20 --out sheet.csv
 python -m citebench.checks wrong-pairs summarize --sheet sheet.csv

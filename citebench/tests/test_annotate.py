@@ -157,6 +157,25 @@ def test_ingest_roundtrip(env):
     assert rec["evidence_offsets"][1]["start"] is None
 
 
+def test_ingest_carries_access_level_and_e3_excludes_abstract(env):
+    from citebench import evaluate as ev
+
+    tmp, units = env
+    sheet = do_export(tmp) / "sheet.csv"
+    for u, al in ((units[0], "full_text"), (units[1], "abstract")):
+        fill(sheet, u.unit_id, access_level=al, support="supported", strength="matches", citation_role="evidence",
+             confidence="2", evidence_spans="Method E may improve accuracy")
+    A.ingest(sheet, tmp / "U.jsonl", tmp / "S.jsonl", tmp / "cache", tmp / "labels.jsonl")
+    recs = [json.loads(x) for x in (tmp / "labels.jsonl").read_text().splitlines()]
+    assert {r["unit_id"]: r["access_level"] for r in recs} == {
+        units[0].unit_id: "full_text", units[1].unit_id: "abstract"}
+    pred = tmp / "pred.jsonl"
+    pred.write_text("\n".join(json.dumps({"unit_id": u.unit_id, "judge": "j", "condition": c, "support": "supported"})
+                              for u in units[:2] for c in ("abstract_only", "correct")) + "\n", encoding="utf-8")
+    r = ev.e3_files(str(tmp / "labels.jsonl"), str(pred), n_boot=10)[0]
+    assert (r["n"], r["n_excluded"], r["exclusion_applied"]) == (1, 1, True)
+
+
 def test_ingest_rejects_invalid(env):
     tmp, units = env
     out = do_export(tmp)

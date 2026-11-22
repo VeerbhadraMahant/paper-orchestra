@@ -319,7 +319,22 @@ def _read_jsonl(path):
         return [json.loads(line) for line in f if line.strip()]
 
 
-def _summarize(golds, preds, n_boot, seed):
+def _calibration(golds, preds, confs):
+    """D21 block for one group, or None when no prediction carries a confidence."""
+    if all(c is None for c in confs):
+        return None
+    for c in confs:
+        if c is not None and c not in DEFAULT_LEVEL_PROBS:
+            raise ValueError(f"confidence must be 1, 2 or 3, got {c!r}")
+    ok = correct_flags(golds, preds)
+    return {
+        "n": sum(c is not None and p is not None for c, p in zip(confs, preds)),
+        "ece": ece_by_level(confs, ok, missing="exclude"),
+        "brier": brier(prob_supported(confs, preds), [g == "supported" for g in golds]),
+    }
+
+
+def _summarize(golds, preds, n_boot, seed, confs=None):
     row = {"n": len(golds), "missing": n_missing(preds)}
     for tag, mode in (("", "wrong"), ("_excl", "exclude")):
         row["acc" + tag] = accuracy(golds, preds, mode)
@@ -327,7 +342,31 @@ def _summarize(golds, preds, n_boot, seed):
             lambda g, p, m=mode: macro_f1(g, p, missing=m), golds, preds, n=n_boot, seed=seed
         )
     row["per_class"] = per_class_prf(golds, preds)
+    row["calibration"] = _calibration(golds, preds, confs or [None] * len(golds))
     return row
+
+
+def _load(gold_path, pred_path):
+    """(gold support, gold access_level, latest support, latest confidence,
+    unknown count). D27/D28 rules: last row per (judge, condition, unit_id)
+    wins, only run_index 0 is scored, rows with unit_id not in gold are skipped."""
+    gold, access = {}, {}
+    for r in _read_jsonl(gold_path):
+        if r["unit_id"] in gold:
+            raise ValueError(f"duplicate gold unit_id {r['unit_id']}")
+        gold[r["unit_id"]] = r["support"]
+        access[r["unit_id"]] = r.get("access_level")
+    latest, conf, unknown = {}, {}, 0
+    for r in _read_jsonl(pred_path):
+        if r["unit_id"] not in gold:
+            unknown += 1
+            continue
+        if r.get("run_index", 0) != 0:
+            continue
+        k = (r.get("judge", "?"), r.get("condition"), r["unit_id"])
+        latest[k] = r.get("support")
+        conf[k] = r.get("confidence")
+    return gold, access, latest, conf, unknown
 
 
 def evaluate_files(gold_path, pred_path, by=None, n_boot=10000, seed=0):
@@ -338,19 +377,7 @@ def evaluate_files(gold_path, pred_path, by=None, n_boot=10000, seed=0):
     A gold unit with no row for a (judge, condition) that appears in the file is
     scored as a missing prediction (D27). With by=None, a judge whose rows span
     several conditions raises ValueError (pooling would duplicate gold units)."""
-    gold = {}
-    for r in _read_jsonl(gold_path):
-        if r["unit_id"] in gold:
-            raise ValueError(f"duplicate gold unit_id {r['unit_id']}")
-        gold[r["unit_id"]] = r["support"]
-    latest, unknown = {}, 0
-    for r in _read_jsonl(pred_path):
-        if r["unit_id"] not in gold:
-            unknown += 1
-            continue
-        if r.get("run_index", 0) != 0:
-            continue
-        latest[(r.get("judge", "?"), r.get("condition"), r["unit_id"])] = r.get("support")
+    gold, _, latest, conf, unknown = _load(gold_path, pred_path)
     pairs = {(j, c) for j, c, _ in latest}
     if by is None:
         conds = defaultdict(set)
@@ -358,14 +385,72 @@ def evaluate_files(gold_path, pred_path, by=None, n_boot=10000, seed=0):
             conds[j].add(c)
         if any(len(v) > 1 for v in conds.values()):
             raise ValueError("predictions span several conditions; use --by condition")
-    groups = defaultdict(lambda: ([], []))
+    groups = defaultdict(lambda: ([], [], []))
     for j, c in sorted(pairs, key=str):
         key = (j, c if by == "condition" else None)
         for uid in sorted(gold):
             groups[key][0].append(gold[uid])
             groups[key][1].append(latest.get((j, c, uid)))
+            groups[key][2].append(conf.get((j, c, uid)))
     ordered = sorted(groups.items(), key=lambda kv: str(kv[0]))
-    return {k: _summarize(g, p, n_boot, seed) for k, (g, p) in ordered}, unknown
+    return {k: _summarize(g, p, n_boot, seed, cf) for k, (g, p, cf) in ordered}, unknown
+
+
+def _scored(latest, judge, cond):
+    """{unit_id: predicted support} for units this judge answered (not None)."""
+    return {u: s for (j, c, u), s in latest.items() if j == judge and c == cond and s is not None}
+
+
+def compare_judges(gold_path, pred_path):
+    """D23: for each condition, every judge pair, on units both scored (non-missing).
+    Exact McNemar on 5-way correctness; Holm across all comparisons returned."""
+    gold, _, latest, _, _ = _load(gold_path, pred_path)
+    judges_by_cond = defaultdict(set)
+    for j, c, _u in latest:
+        judges_by_cond[c].add(j)
+    rows = []
+    for c in sorted(judges_by_cond, key=str):
+        js = sorted(judges_by_cond[c])
+        for i, ja in enumerate(js):
+            for jb in js[i + 1:]:
+                sa, sb = _scored(latest, ja, c), _scored(latest, jb, c)
+                units = sorted(set(sa) & set(sb))
+                ca = [sa[u] == gold[u] for u in units]
+                cb = [sb[u] == gold[u] for u in units]
+                b, cc = discordant(ca, cb)
+                rows.append({"condition": c, "judge_a": ja, "judge_b": jb, "n": len(units),
+                             "a_only_correct": b, "b_only_correct": cc, "p": mcnemar_exact(ca, cb)})
+    for r, adj in zip(rows, holm([r["p"] for r in rows])):
+        r["p_holm"] = adj
+    return rows
+
+
+def e3_files(gold_path, pred_path, n_boot=10000, seed=0):
+    """E3 (RQ4, D25): per judge, accuracy with abstract_only minus correct, on
+    units with a non-missing prediction under both. Gold units whose gold record
+    has access_level other than full_text are excluded; if no gold record has an
+    access_level the exclusion cannot be applied and "exclusion_applied" is False."""
+    gold, access, latest, _, _ = _load(gold_path, pred_path)
+    applied = any(a is not None for a in access.values())
+    out = []
+    for judge in sorted({j for j, _, _ in latest}):
+        sa, sc = _scored(latest, judge, "abstract_only"), _scored(latest, judge, "correct")
+        shared = sorted(set(sa) & set(sc))
+        units = [u for u in shared if access[u] in (None, "full_text")]
+        ca = [sa[u] == gold[u] for u in units]
+        cc = [sc[u] == gold[u] for u in units]
+        diff = bootstrap_ci(lambda x, y: float(np.mean(x) - np.mean(y)) if len(x) else float("nan"),
+                            ca, cc, n=n_boot, seed=seed)
+        b, c = discordant(ca, cc)
+        ga = [gold[u] for u in units]
+        f1d = bootstrap_ci(lambda g, x, y: macro_f1(g, x) - macro_f1(g, y), ga,
+                           [sa[u] for u in units], [sc[u] for u in units], n=n_boot, seed=seed)
+        out.append({"judge": judge, "f1_diff": f1d, "n": len(units), "n_excluded": len(shared) - len(units),
+                    "acc_abstract_only": float(np.mean(ca)) if units else float("nan"),
+                    "acc_correct": float(np.mean(cc)) if units else float("nan"),
+                    "diff": diff, "abstract_only_right": b, "correct_right": c,
+                    "p": mcnemar_exact(ca, cc), "exclusion_applied": applied})
+    return out
 
 
 def format_report(results, unknown=0):
@@ -379,8 +464,36 @@ def format_report(results, unknown=0):
         lines.append(f"  accuracy={s['acc']:.3f} macro-F1={ci(s['f1'])}  (missing counted wrong)")
         lines.append(f"  accuracy={s['acc_excl']:.3f} macro-F1={ci(s['f1_excl'])}  (missing excluded)")
         lines.append("  per-class F1: " + " ".join(f"{k}={v['f1']:.3f}" for k, v in s["per_class"].items()))
+        cal = s.get("calibration")
+        lines.append("  calibration: not available (no confidence given)" if cal is None else
+                     f"  calibration (n={cal['n']}): ECE={cal['ece']:.3f} Brier={cal['brier']:.3f}")
     if unknown:
         lines.append(f"note: {unknown} prediction rows had a unit_id not in gold and were skipped")
+    return "\n".join(lines)
+
+
+def format_compare(rows):
+    lines = []
+    for r in rows:
+        cond = f" condition={r['condition']}" if r["condition"] is not None else ""
+        lines.append(f"compare {r['judge_a']} vs {r['judge_b']}{cond}: n={r['n']} "
+                     f"only-{r['judge_a']}-correct={r['a_only_correct']} only-{r['judge_b']}-correct={r['b_only_correct']} "
+                     f"McNemar p={r['p']:.4f} Holm p={r['p_holm']:.4f}")
+    return "\n".join(lines)
+
+
+def format_e3(rows):
+    lines = []
+    for r in rows:
+        d = r["diff"]
+        lines.append(f"E3 judge={r['judge']}: n={r['n']} excluded={r['n_excluded']} "
+                     f"acc abstract_only={r['acc_abstract_only']:.3f} correct={r['acc_correct']:.3f} "
+                     f"diff={d[0]:.3f} [{d[1]:.3f}, {d[2]:.3f}] "
+                     f"macro-F1 diff={r['f1_diff'][0]:.3f} [{r['f1_diff'][1]:.3f}, {r['f1_diff'][2]:.3f}] "
+                     f"McNemar p={r['p']:.4f}")
+    if rows and not rows[0]["exclusion_applied"]:
+        lines.append("note: gold has no access_level field, so D25 (exclude abstract-only gold units) "
+                     "could not be applied; no units were excluded")
     return "\n".join(lines)
 
 
@@ -391,9 +504,23 @@ def main(argv=None):
     ap.add_argument("--by", choices=["condition"], default=None)
     ap.add_argument("--n-boot", type=int, default=10000)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--compare", action="store_true", help="pairwise McNemar between judges (D23)")
+    ap.add_argument("--e3", action="store_true", help="abstract_only vs correct per judge (E3, D25)")
+    ap.add_argument("--json", metavar="OUT", help="write the full results dict as JSON")
     a = ap.parse_args(argv)
     results, unknown = evaluate_files(a.gold, a.pred, a.by, a.n_boot, a.seed)
     print(format_report(results, unknown))
+    full = {"results": [{"judge": j, "condition": c, **v} for (j, c), v in results.items()],
+            "unknown_rows": unknown}
+    if a.compare:
+        full["compare"] = compare_judges(a.gold, a.pred)
+        print(format_compare(full["compare"]))
+    if a.e3:
+        full["e3"] = e3_files(a.gold, a.pred, a.n_boot, a.seed)
+        print(format_e3(full["e3"]))
+    if a.json:
+        with open(a.json, "w", encoding="utf-8") as f:
+            json.dump(full, f, indent=2)
     return 0
 
 
