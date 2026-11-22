@@ -442,7 +442,10 @@ def e3_files(gold_path, pred_path, n_boot=10000, seed=0):
         diff = bootstrap_ci(lambda x, y: float(np.mean(x) - np.mean(y)) if len(x) else float("nan"),
                             ca, cc, n=n_boot, seed=seed)
         b, c = discordant(ca, cc)
-        out.append({"judge": judge, "n": len(units), "n_excluded": len(shared) - len(units),
+        ga = [gold[u] for u in units]
+        f1d = bootstrap_ci(lambda g, x, y: macro_f1(g, x) - macro_f1(g, y), ga,
+                           [sa[u] for u in units], [sc[u] for u in units], n=n_boot, seed=seed)
+        out.append({"judge": judge, "f1_diff": f1d, "n": len(units), "n_excluded": len(shared) - len(units),
                     "acc_abstract_only": float(np.mean(ca)) if units else float("nan"),
                     "acc_correct": float(np.mean(cc)) if units else float("nan"),
                     "diff": diff, "abstract_only_right": b, "correct_right": c,
@@ -485,7 +488,9 @@ def format_e3(rows):
         d = r["diff"]
         lines.append(f"E3 judge={r['judge']}: n={r['n']} excluded={r['n_excluded']} "
                      f"acc abstract_only={r['acc_abstract_only']:.3f} correct={r['acc_correct']:.3f} "
-                     f"diff={d[0]:.3f} [{d[1]:.3f}, {d[2]:.3f}] McNemar p={r['p']:.4f}")
+                     f"diff={d[0]:.3f} [{d[1]:.3f}, {d[2]:.3f}] "
+                     f"macro-F1 diff={r['f1_diff'][0]:.3f} [{r['f1_diff'][1]:.3f}, {r['f1_diff'][2]:.3f}] "
+                     f"McNemar p={r['p']:.4f}")
     if rows and not rows[0]["exclusion_applied"]:
         lines.append("note: gold has no access_level field, so D25 (exclude abstract-only gold units) "
                      "could not be applied; no units were excluded")

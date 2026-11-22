@@ -308,6 +308,8 @@ def test_e3_pairs_shared_units_and_d25(tmp_path):
     assert (r["n"], r["n_excluded"], r["exclusion_applied"]) == (3, 1, True)
     assert r["acc_abstract_only"] == pytest.approx(1 / 3) and r["acc_correct"] == 1.0
     assert r["diff"][0] == pytest.approx(-2 / 3)
+    # macro-F1: abstract_only S f1=.5, N f1=0 (predicted only) -> .25; correct 1.0
+    assert r["f1_diff"][0] == pytest.approx(-0.75) and r["f1_diff"][1] <= -0.75 <= r["f1_diff"][2]
     assert (r["abstract_only_right"], r["correct_right"]) == (0, 2)
     assert r["p"] == pytest.approx(0.5)
 

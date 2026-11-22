@@ -237,6 +237,7 @@ def ingest(sheet, units_path, sources_path, cache, out, annotator=None) -> dict:
                 "time_spent_sec": int(r["time_spent_sec"]) if r.get("time_spent_sec", "").strip() else None,
                 "notes": r.get("notes", "").strip(),
                 "labeled_at": r.get("labeled_at", "").strip() or now,
+                "access_level": r.get("access_level", "").strip() or None,
             }
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             n += 1
