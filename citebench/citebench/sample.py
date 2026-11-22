@@ -158,9 +158,40 @@ def _write_jsonl(path, rows) -> None:
     Path(path).write_text("".join(json.dumps(x, ensure_ascii=False) + "\n" for x in rows), encoding="utf-8")
 
 
+def materialize(manifest_path, units_dir, out) -> int:
+    """Write the manifest's units (with sentence text) from per-survey unit files, in manifest order.
+
+    Raises ValueError if a unit_id is missing or its survey_id/cite_key/offsets disagree with the manifest.
+    """
+    from .units import write_jsonl
+
+    entries = json.loads(Path(manifest_path).read_text(encoding="utf-8"))["units"]
+    found: dict[str, dict[str, Unit]] = {}
+    for sid in sorted({e["survey_id"] for e in entries}):
+        p = Path(units_dir) / f"{sid}.jsonl"
+        if not p.exists():
+            raise ValueError(f"missing unit file {p}")
+        found[sid] = {u.unit_id: u for u in read_jsonl(p, Unit)}
+    rows = []
+    for e in entries:
+        u = found[e["survey_id"]].get(e["unit_id"])
+        if u is None:
+            raise ValueError(f"unit_id {e['unit_id']} not found in {e['survey_id']}.jsonl")
+        for k in ("survey_id", "cite_key", "char_start", "char_end"):
+            if getattr(u, k) != e[k]:
+                raise ValueError(f"unit {e['unit_id']}: {k} is {getattr(u, k)!r}, manifest says {e[k]!r}")
+        rows.append(u)
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    return write_jsonl(out, rows)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m citebench.sample")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    m = sub.add_parser("materialize")
+    m.add_argument("--manifest", required=True)
+    m.add_argument("--units-dir", required=True)
+    m.add_argument("--out", required=True)
     c = sub.add_parser("candidates")
     c.add_argument("--units-dir", required=True)
     c.add_argument("--out", required=True)
@@ -170,6 +201,14 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--out", required=True)
     f.add_argument("--manifest", required=True)
     a = ap.parse_args(argv)
+    if a.cmd == "materialize":
+        try:
+            n = materialize(a.manifest, a.units_dir, a.out)
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        print(f"{n} units written")
+        return 0
     if a.cmd == "candidates":
         ubs = {p.stem: list(read_jsonl(p, Unit)) for p in sorted(Path(a.units_dir).glob("*.jsonl"))}
         cands = sample(ubs)
