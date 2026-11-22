@@ -334,7 +334,7 @@ def _calibration(golds, preds, confs):
     }
 
 
-def _summarize(golds, preds, n_boot, seed, confs=None):
+def _summarize(golds, preds, n_boot, seed, confs=None, clusters=None):
     row = {"n": len(golds), "missing": n_missing(preds)}
     for tag, mode in (("", "wrong"), ("_excl", "exclude")):
         row["acc" + tag] = accuracy(golds, preds, mode)
@@ -343,19 +343,27 @@ def _summarize(golds, preds, n_boot, seed, confs=None):
         )
     row["per_class"] = per_class_prf(golds, preds)
     row["calibration"] = _calibration(golds, preds, confs or [None] * len(golds))
+    # D22 sensitivity: resample whole surveys. Needs survey_id on every gold row, else not available.
+    if clusters and all(c is not None for c in clusters):
+        row["acc_cluster"] = cluster_bootstrap_ci(accuracy, clusters, golds, preds, n=n_boot, seed=seed)
+        row["f1_cluster"] = cluster_bootstrap_ci(macro_f1, clusters, golds, preds, n=n_boot, seed=seed)
+    else:
+        row["acc_cluster"] = row["f1_cluster"] = None
     return row
 
 
 def _load(gold_path, pred_path):
-    """(gold support, gold access_level, latest support, latest confidence,
-    unknown count). D27/D28 rules: last row per (judge, condition, unit_id)
-    wins, only run_index 0 is scored, rows with unit_id not in gold are skipped."""
-    gold, access = {}, {}
+    """(gold support, gold access_level, gold survey_id, latest support, latest
+    confidence, unknown count). D27/D28 rules: last row per (judge, condition,
+    unit_id) wins, only run_index 0 is scored, rows with unit_id not in gold
+    are skipped."""
+    gold, access, survey = {}, {}, {}
     for r in _read_jsonl(gold_path):
         if r["unit_id"] in gold:
             raise ValueError(f"duplicate gold unit_id {r['unit_id']}")
         gold[r["unit_id"]] = r["support"]
         access[r["unit_id"]] = r.get("access_level")
+        survey[r["unit_id"]] = r.get("survey_id")
     latest, conf, unknown = {}, {}, 0
     for r in _read_jsonl(pred_path):
         if r["unit_id"] not in gold:
@@ -366,7 +374,7 @@ def _load(gold_path, pred_path):
         k = (r.get("judge", "?"), r.get("condition"), r["unit_id"])
         latest[k] = r.get("support")
         conf[k] = r.get("confidence")
-    return gold, access, latest, conf, unknown
+    return gold, access, survey, latest, conf, unknown
 
 
 def evaluate_files(gold_path, pred_path, by=None, n_boot=10000, seed=0):
@@ -377,7 +385,7 @@ def evaluate_files(gold_path, pred_path, by=None, n_boot=10000, seed=0):
     A gold unit with no row for a (judge, condition) that appears in the file is
     scored as a missing prediction (D27). With by=None, a judge whose rows span
     several conditions raises ValueError (pooling would duplicate gold units)."""
-    gold, _, latest, conf, unknown = _load(gold_path, pred_path)
+    gold, _, survey, latest, conf, unknown = _load(gold_path, pred_path)
     pairs = {(j, c) for j, c, _ in latest}
     if by is None:
         conds = defaultdict(set)
@@ -385,26 +393,36 @@ def evaluate_files(gold_path, pred_path, by=None, n_boot=10000, seed=0):
             conds[j].add(c)
         if any(len(v) > 1 for v in conds.values()):
             raise ValueError("predictions span several conditions; use --by condition")
-    groups = defaultdict(lambda: ([], [], []))
+    groups = defaultdict(lambda: ([], [], [], []))
     for j, c in sorted(pairs, key=str):
         key = (j, c if by == "condition" else None)
         for uid in sorted(gold):
             groups[key][0].append(gold[uid])
             groups[key][1].append(latest.get((j, c, uid)))
             groups[key][2].append(conf.get((j, c, uid)))
+            groups[key][3].append(survey[uid])
     ordered = sorted(groups.items(), key=lambda kv: str(kv[0]))
-    return {k: _summarize(g, p, n_boot, seed, cf) for k, (g, p, cf) in ordered}, unknown
+    return {k: _summarize(g, p, n_boot, seed, cf, cl) for k, (g, p, cf, cl) in ordered}, unknown
 
 
-def _scored(latest, judge, cond):
-    """{unit_id: predicted support} for units this judge answered (not None)."""
-    return {u: s for (j, c, u), s in latest.items() if j == judge and c == cond and s is not None}
+def _preds(latest, judge, cond):
+    """{unit_id: predicted support or None} for this judge and condition."""
+    return {u: s for (j, c, u), s in latest.items() if j == judge and c == cond}
+
+
+def _correct(pred, gold, units):
+    """Correctness per unit; None where the prediction is missing."""
+    return [None if pred.get(u) is None else pred[u] == gold[u] for u in units]
 
 
 def compare_judges(gold_path, pred_path):
-    """D23: for each condition, every judge pair, on units both scored (non-missing).
-    Exact McNemar on 5-way correctness; Holm across all comparisons returned."""
-    gold, _, latest, _, _ = _load(gold_path, pred_path)
+    """D23, D27: per condition, every judge pair, exact McNemar on 5-way correctness.
+
+    Primary: all gold units, a missing prediction counts as wrong. Secondary
+    (row["excl"]): only units both judges answered. Both passes carry n and
+    missing_a / missing_b (missing predictions over all gold units). Holm is
+    applied across all returned comparisons, separately for each pass."""
+    gold, _, _, latest, _, _ = _load(gold_path, pred_path)
     judges_by_cond = defaultdict(set)
     for j, c, _u in latest:
         judges_by_cond[c].add(j)
@@ -413,43 +431,65 @@ def compare_judges(gold_path, pred_path):
         js = sorted(judges_by_cond[c])
         for i, ja in enumerate(js):
             for jb in js[i + 1:]:
-                sa, sb = _scored(latest, ja, c), _scored(latest, jb, c)
-                units = sorted(set(sa) & set(sb))
-                ca = [sa[u] == gold[u] for u in units]
-                cb = [sb[u] == gold[u] for u in units]
-                b, cc = discordant(ca, cb)
-                rows.append({"condition": c, "judge_a": ja, "judge_b": jb, "n": len(units),
-                             "a_only_correct": b, "b_only_correct": cc, "p": mcnemar_exact(ca, cb)})
+                pa, pb = _preds(latest, ja, c), _preds(latest, jb, c)
+                ma = sum(pa.get(u) is None for u in gold)
+                mb = sum(pb.get(u) is None for u in gold)
+
+                def stats(units):
+                    ca, cb = _correct(pa, gold, units), _correct(pb, gold, units)
+                    b, cc = discordant(ca, cb)
+                    return {"n": len(units), "missing_a": ma, "missing_b": mb,
+                            "a_only_correct": b, "b_only_correct": cc, "p": mcnemar_exact(ca, cb)}
+
+                shared = [u for u in sorted(gold) if pa.get(u) is not None and pb.get(u) is not None]
+                rows.append({"condition": c, "judge_a": ja, "judge_b": jb,
+                             **stats(sorted(gold)), "excl": stats(shared)})
     for r, adj in zip(rows, holm([r["p"] for r in rows])):
         r["p_holm"] = adj
+    for r, adj in zip(rows, holm([r["excl"]["p"] for r in rows])):
+        r["excl"]["p_holm"] = adj
     return rows
 
 
+def _e3_stats(units, gold, sa, sc, n_boot, seed):
+    ca = [sa.get(u) == gold[u] for u in units]  # a missing prediction (None) is wrong
+    cc = [sc.get(u) == gold[u] for u in units]
+    diff = bootstrap_ci(lambda x, y: float(np.mean(x) - np.mean(y)) if len(x) else float("nan"),
+                        ca, cc, n=n_boot, seed=seed)
+    b, c = discordant(ca, cc)
+    f1d = bootstrap_ci(lambda g, x, y: macro_f1(g, x) - macro_f1(g, y), [gold[u] for u in units],
+                       [sa.get(u) for u in units], [sc.get(u) for u in units], n=n_boot, seed=seed)
+    return {"n": len(units), "missing_abstract_only": sum(sa.get(u) is None for u in units),
+            "missing_correct": sum(sc.get(u) is None for u in units),
+            "acc_abstract_only": float(np.mean(ca)) if units else float("nan"),
+            "acc_correct": float(np.mean(cc)) if units else float("nan"),
+            "diff": diff, "f1_diff": f1d, "abstract_only_right": b, "correct_right": c,
+            "p": mcnemar_exact(ca, cc)}
+
+
 def e3_files(gold_path, pred_path, n_boot=10000, seed=0):
-    """E3 (RQ4, D25): per judge, accuracy with abstract_only minus correct, on
-    units with a non-missing prediction under both. Gold units whose gold record
-    has access_level other than full_text are excluded; if no gold record has an
-    access_level the exclusion cannot be applied and "exclusion_applied" is False."""
-    gold, access, latest, _, _ = _load(gold_path, pred_path)
+    """E3 (RQ4, D25, D27): per judge, accuracy and macro-F1 with abstract_only
+    minus correct. Primary: every gold unit with full text, a missing prediction
+    counts as wrong. Secondary (row["excl"]): only units with a prediction under
+    both conditions. Once any gold record has an access_level (exclusion_applied),
+    a gold unit is kept only if its access_level is full_text; the rest are
+    excluded and tallied in "excluded_reasons" by access_level, or "missing_field"
+    when the gold record has none. If no gold record has one, nothing can be
+    excluded and "exclusion_applied" is False."""
+    gold, access, _, latest, _, _ = _load(gold_path, pred_path)
     applied = any(a is not None for a in access.values())
+    keep = [u for u in sorted(gold) if not applied or access[u] == "full_text"]
+    reasons = defaultdict(int)
+    for u in gold:
+        if applied and access[u] != "full_text":
+            reasons[access[u] or "missing_field"] += 1
     out = []
     for judge in sorted({j for j, _, _ in latest}):
-        sa, sc = _scored(latest, judge, "abstract_only"), _scored(latest, judge, "correct")
-        shared = sorted(set(sa) & set(sc))
-        units = [u for u in shared if access[u] in (None, "full_text")]
-        ca = [sa[u] == gold[u] for u in units]
-        cc = [sc[u] == gold[u] for u in units]
-        diff = bootstrap_ci(lambda x, y: float(np.mean(x) - np.mean(y)) if len(x) else float("nan"),
-                            ca, cc, n=n_boot, seed=seed)
-        b, c = discordant(ca, cc)
-        ga = [gold[u] for u in units]
-        f1d = bootstrap_ci(lambda g, x, y: macro_f1(g, x) - macro_f1(g, y), ga,
-                           [sa[u] for u in units], [sc[u] for u in units], n=n_boot, seed=seed)
-        out.append({"judge": judge, "f1_diff": f1d, "n": len(units), "n_excluded": len(shared) - len(units),
-                    "acc_abstract_only": float(np.mean(ca)) if units else float("nan"),
-                    "acc_correct": float(np.mean(cc)) if units else float("nan"),
-                    "diff": diff, "abstract_only_right": b, "correct_right": c,
-                    "p": mcnemar_exact(ca, cc), "exclusion_applied": applied})
+        sa, sc = _preds(latest, judge, "abstract_only"), _preds(latest, judge, "correct")
+        shared = [u for u in keep if sa.get(u) is not None and sc.get(u) is not None]
+        out.append({"judge": judge, **_e3_stats(keep, gold, sa, sc, n_boot, seed),
+                    "n_excluded": len(gold) - len(keep), "excluded_reasons": dict(sorted(reasons.items())),
+                    "excl": _e3_stats(shared, gold, sa, sc, n_boot, seed), "exclusion_applied": applied})
     return out
 
 
@@ -463,6 +503,11 @@ def format_report(results, unknown=0):
         lines.append(f"  n={s['n']} missing={s['missing']}")
         lines.append(f"  accuracy={s['acc']:.3f} macro-F1={ci(s['f1'])}  (missing counted wrong)")
         lines.append(f"  accuracy={s['acc_excl']:.3f} macro-F1={ci(s['f1_excl'])}  (missing excluded)")
+        if s.get("acc_cluster") is None:
+            lines.append("  survey-cluster bootstrap: not available (gold has no survey_id)")
+        else:
+            lines.append(f"  survey-cluster bootstrap (missing counted wrong): accuracy={ci(s['acc_cluster'])} "
+                         f"macro-F1={ci(s['f1_cluster'])}")
         lines.append("  per-class F1: " + " ".join(f"{k}={v['f1']:.3f}" for k, v in s["per_class"].items()))
         cal = s.get("calibration")
         lines.append("  calibration: not available (no confidence given)" if cal is None else
@@ -476,25 +521,42 @@ def format_compare(rows):
     lines = []
     for r in rows:
         cond = f" condition={r['condition']}" if r["condition"] is not None else ""
-        lines.append(f"compare {r['judge_a']} vs {r['judge_b']}{cond}: n={r['n']} "
-                     f"only-{r['judge_a']}-correct={r['a_only_correct']} only-{r['judge_b']}-correct={r['b_only_correct']} "
-                     f"McNemar p={r['p']:.4f} Holm p={r['p_holm']:.4f}")
+        a, b = r["judge_a"], r["judge_b"]
+        for tag, s in (("missing counted wrong", r), ("missing excluded", r["excl"])):
+            lines.append(f"compare {a} vs {b}{cond} ({tag}): n={s['n']} missing {a}={s['missing_a']} {b}={s['missing_b']} "
+                         f"only-{a}-correct={s['a_only_correct']} only-{b}-correct={s['b_only_correct']} "
+                         f"McNemar p={s['p']:.4f} Holm p={s['p_holm']:.4f}")
     return "\n".join(lines)
 
 
 def format_e3(rows):
+    def line(r, s, tag):
+        d, f = s["diff"], s["f1_diff"]
+        return (f"E3 judge={r['judge']} ({tag}): n={s['n']} missing abstract_only={s['missing_abstract_only']} "
+                f"correct={s['missing_correct']} acc abstract_only={s['acc_abstract_only']:.3f} "
+                f"correct={s['acc_correct']:.3f} diff={d[0]:.3f} [{d[1]:.3f}, {d[2]:.3f}] "
+                f"macro-F1 diff={f[0]:.3f} [{f[1]:.3f}, {f[2]:.3f}] McNemar p={s['p']:.4f}")
+
     lines = []
     for r in rows:
-        d = r["diff"]
-        lines.append(f"E3 judge={r['judge']}: n={r['n']} excluded={r['n_excluded']} "
-                     f"acc abstract_only={r['acc_abstract_only']:.3f} correct={r['acc_correct']:.3f} "
-                     f"diff={d[0]:.3f} [{d[1]:.3f}, {d[2]:.3f}] "
-                     f"macro-F1 diff={r['f1_diff'][0]:.3f} [{r['f1_diff'][1]:.3f}, {r['f1_diff'][2]:.3f}] "
-                     f"McNemar p={r['p']:.4f}")
+        why = " ".join(f"{k}={v}" for k, v in r["excluded_reasons"].items())
+        lines.append(line(r, r, "missing counted wrong") + f" excluded={r['n_excluded']}" + (f" ({why})" if why else ""))
+        lines.append(line(r, r["excl"], "missing excluded"))
     if rows and not rows[0]["exclusion_applied"]:
         lines.append("note: gold has no access_level field, so D25 (exclude abstract-only gold units) "
                      "could not be applied; no units were excluded")
     return "\n".join(lines)
+
+
+def _json_safe(x):
+    """Recursively replace nan and inf by None so the output is strict JSON."""
+    if isinstance(x, float):
+        return x if math.isfinite(x) else None
+    if isinstance(x, dict):
+        return {k: _json_safe(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_json_safe(v) for v in x]
+    return x
 
 
 def main(argv=None):
@@ -508,7 +570,8 @@ def main(argv=None):
     ap.add_argument("--e3", action="store_true", help="abstract_only vs correct per judge (E3, D25)")
     ap.add_argument("--json", metavar="OUT", help="write the full results dict as JSON")
     a = ap.parse_args(argv)
-    results, unknown = evaluate_files(a.gold, a.pred, a.by, a.n_boot, a.seed)
+    by = a.by or ("condition" if a.compare or a.e3 else None)  # both analyses are per condition
+    results, unknown = evaluate_files(a.gold, a.pred, by, a.n_boot, a.seed)
     print(format_report(results, unknown))
     full = {"results": [{"judge": j, "condition": c, **v} for (j, c), v in results.items()],
             "unknown_rows": unknown}
@@ -520,7 +583,7 @@ def main(argv=None):
         print(format_e3(full["e3"]))
     if a.json:
         with open(a.json, "w", encoding="utf-8") as f:
-            json.dump(full, f, indent=2)
+            json.dump(_json_safe(full), f, indent=2, allow_nan=False)
     return 0
 
 

@@ -23,9 +23,12 @@ ANSWERS = ("yes", "no", "unsure")
 
 
 def export(calls_path, units_path, sources_path, cache, n, seed, out) -> int:
-    calls = [json.loads(l) for l in Path(calls_path).read_text(encoding="utf-8").splitlines() if l.strip()]
-    wrong = sorted((c for c in calls if c["condition"] == "wrong_related"), key=lambda c: c["call_id"])
-    pick = sorted(random.Random(seed).sample(wrong, min(n, len(wrong))), key=lambda c: c["call_id"])
+    rows = [json.loads(l) for l in Path(calls_path).read_text(encoding="utf-8").splitlines() if l.strip()]
+    calls = {c["call_id"]: c for c in rows}  # last row wins
+    wrong = sorted((c for c in calls.values() if c["condition"] == "wrong_related"), key=lambda c: c["call_id"])
+    if len(wrong) < n:
+        raise ValueError(f"only {len(wrong)} wrong_related calls, fewer than --n {n}")
+    pick = sorted(random.Random(seed).sample(wrong, n), key=lambda c: c["call_id"])
     ctx = Context(list(read_jsonl(units_path, Unit)), latest_records(sources_path), cache)
     with open(out, "w", encoding="utf-8-sig", newline="") as f:  # same as annotate.py, opens in Excel
         w = csv.DictWriter(f, fieldnames=COLUMNS)
@@ -43,7 +46,15 @@ def export(calls_path, units_path, sources_path, cache, n, seed, out) -> int:
 def summarize(sheet) -> tuple[Counter, list[str]]:
     """Counts of answers and the call_ids answered yes or unsure. Raises ValueError on a blank or unknown answer."""
     with open(sheet, encoding="utf-8-sig", newline="") as f:
-        rows = list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        absent = [h for h in ("call_id", "wrong_source_supports") if h not in (reader.fieldnames or [])]
+        if absent:
+            raise ValueError(f"sheet is missing required columns: {absent}")
+        rows = list(reader)
+    ids = [r["call_id"] for r in rows]
+    dup = sorted({i for i in ids if ids.count(i) > 1})
+    if dup:
+        raise ValueError(f"duplicate call_id rows: {dup[:5]}")
     bad = [f"row {i}: {r['wrong_source_supports']!r}" for i, r in enumerate(rows, 2)
            if (r["wrong_source_supports"] or "").strip().lower() not in ANSWERS]
     if bad:
@@ -67,7 +78,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--sheet", required=True)
     a = ap.parse_args(argv)
     if a.act == "export":
-        print(f"{export(a.calls, a.units, a.sources, a.cache, a.n, a.seed, a.out)} pairs written")
+        try:
+            print(f"{export(a.calls, a.units, a.sources, a.cache, a.n, a.seed, a.out)} pairs written")
+        except ValueError as err:
+            print(f"error: {err}", file=sys.stderr)
+            return 1
         return 0
     try:
         counts, flagged = summarize(a.sheet)

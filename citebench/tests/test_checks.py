@@ -59,3 +59,38 @@ def test_summarize(tmp_path):
     with pytest.raises(ValueError):
         checks.summarize(out)
     assert checks.main(["wrong-pairs", "summarize", "--sheet", str(out)]) == 1
+
+
+def test_export_fails_when_too_few_wrong_related(tmp_path, capsys):
+    cp, up, sp, cache, calls = _setup(tmp_path)
+    n_wrong = sum(c["condition"] == "wrong_related" for c in calls)
+    out = tmp_path / "s.csv"
+    args = ["wrong-pairs", "export", "--calls", str(cp), "--units", str(up), "--sources", str(sp),
+            "--cache", str(cache), "--out", str(out), "--n", str(n_wrong + 1)]
+    assert checks.main(args) == 1
+    assert f"only {n_wrong} wrong_related calls" in capsys.readouterr().err and not out.exists()
+
+
+def test_export_dedupes_calls_by_call_id_last_wins(tmp_path):
+    cp, up, sp, cache, calls = _setup(tmp_path)
+    wrong = [c for c in calls if c["condition"] == "wrong_related"]
+    dup = {**wrong[0], "evidence": {**wrong[0]["evidence"], "key": "LAST"}}
+    cp.write_text("".join(json.dumps(c) + "\n" for c in calls + [dup]), encoding="utf-8")
+    out = tmp_path / "s.csv"
+    assert checks.export(cp, up, sp, cache, len(wrong), 1, out) == len(wrong)
+    rows = list(csv.DictReader(open(out, encoding="utf-8-sig", newline="")))
+    assert len({r["call_id"] for r in rows}) == len(rows)
+    assert next(r for r in rows if r["call_id"] == dup["call_id"])["donor_key"] == "LAST"
+
+
+def test_summarize_missing_headers_and_duplicate_call_id(tmp_path, capsys):
+    bad = tmp_path / "bad.csv"
+    bad.write_text("call_id,note\nc1,x\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="missing required columns"):
+        checks.summarize(bad)
+    assert checks.main(["wrong-pairs", "summarize", "--sheet", str(bad)]) == 1
+    assert "missing required columns" in capsys.readouterr().err
+    dup = tmp_path / "dup.csv"
+    dup.write_text("call_id,wrong_source_supports\nc1,no\nc1,yes\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate call_id"):
+        checks.summarize(dup)

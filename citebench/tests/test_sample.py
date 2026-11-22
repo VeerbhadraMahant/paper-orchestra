@@ -120,3 +120,35 @@ def test_materialize(tmp_path, capsys):
         mp.write_text(json.dumps({"units": [{**m[0], **bad}]}), encoding="utf-8")
         assert main(["materialize", "--manifest", str(mp), "--units-dir", str(d), "--out", str(out)]) == 1
         assert "error:" in capsys.readouterr().err
+
+
+def test_materialize_rejects_bad_manifest_or_units(tmp_path, capsys):
+    from citebench.sample import main
+    from citebench.units import write_jsonl
+
+    us = [unit("s1", n, EV, key=f"k{n}") for n in range(3)]
+    d = tmp_path / "units"
+    d.mkdir()
+    write_jsonl(d / "s1.jsonl", us)
+    keys = ("unit_id", "survey_id", "char_start", "char_end", "cite_key")
+    m = [{k: getattr(u, k) for k in keys} for u in us[:2]]
+    mp, out = tmp_path / "m.json", tmp_path / "o.jsonl"
+    run = ["materialize", "--manifest", str(mp), "--units-dir", str(d), "--out", str(out)]
+
+    def fails(manifest_, text):
+        mp.write_text(json.dumps(manifest_), encoding="utf-8")
+        assert main(run) == 1
+        assert text in capsys.readouterr().err
+
+    fails({"units": [m[0], m[0]]}, "duplicate unit_id in manifest")
+    fails({"units": m, "counts": {"total": 3}}, "counts.total")
+    mp.write_text(json.dumps({"units": m, "counts": {"total": 2}}), encoding="utf-8")
+    assert main(run) == 0
+    write_jsonl(d / "s1.jsonl", us + [us[0]])  # duplicate of a needed id
+    fails({"units": m}, "duplicate unit_id")
+    write_jsonl(d / "s1.jsonl", us + [us[2]])  # duplicate of an id the manifest does not need: fine
+    mp.write_text(json.dumps({"units": m}), encoding="utf-8")
+    assert main(run) == 0
+    blank = unit("s1", 9, "   ", key="k9")
+    write_jsonl(d / "s1.jsonl", [blank])
+    fails({"units": [{k: getattr(blank, k) for k in keys}]}, "empty sentence_text")

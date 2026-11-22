@@ -165,18 +165,33 @@ def materialize(manifest_path, units_dir, out) -> int:
     """
     from .units import write_jsonl
 
-    entries = json.loads(Path(manifest_path).read_text(encoding="utf-8"))["units"]
+    data = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    entries = data["units"]
+    ids = [e["unit_id"] for e in entries]
+    dup = sorted({i for i in ids if ids.count(i) > 1})
+    if dup:
+        raise ValueError(f"duplicate unit_id in manifest: {dup[:5]}")
+    total = (data.get("counts") or {}).get("total")
+    if total is not None and total != len(entries):
+        raise ValueError(f"manifest counts.total is {total} but it lists {len(entries)} units")
+    needed = set(ids)
     found: dict[str, dict[str, Unit]] = {}
     for sid in sorted({e["survey_id"] for e in entries}):
         p = Path(units_dir) / f"{sid}.jsonl"
         if not p.exists():
             raise ValueError(f"missing unit file {p}")
-        found[sid] = {u.unit_id: u for u in read_jsonl(p, Unit)}
+        found[sid] = {}
+        for u in read_jsonl(p, Unit):
+            if u.unit_id in needed and u.unit_id in found[sid]:
+                raise ValueError(f"duplicate unit_id {u.unit_id} in {sid}.jsonl")
+            found[sid][u.unit_id] = u
     rows = []
     for e in entries:
         u = found[e["survey_id"]].get(e["unit_id"])
         if u is None:
             raise ValueError(f"unit_id {e['unit_id']} not found in {e['survey_id']}.jsonl")
+        if not u.sentence_text.strip():
+            raise ValueError(f"unit {e['unit_id']}: empty sentence_text")
         for k in ("survey_id", "cite_key", "char_start", "char_end"):
             if getattr(u, k) != e[k]:
                 raise ValueError(f"unit {e['unit_id']}: {k} is {getattr(u, k)!r}, manifest says {e[k]!r}")

@@ -169,6 +169,7 @@ def test_ingest_carries_access_level_and_e3_excludes_abstract(env):
     recs = [json.loads(x) for x in (tmp / "labels.jsonl").read_text().splitlines()]
     assert {r["unit_id"]: r["access_level"] for r in recs} == {
         units[0].unit_id: "full_text", units[1].unit_id: "abstract"}
+    assert {r["unit_id"]: r["survey_id"] for r in recs} == {u.unit_id: u.survey_id for u in units[:2]}
     pred = tmp / "pred.jsonl"
     pred.write_text("\n".join(json.dumps({"unit_id": u.unit_id, "judge": "j", "condition": c, "support": "supported"})
                               for u in units[:2] for c in ("abstract_only", "correct")) + "\n", encoding="utf-8")

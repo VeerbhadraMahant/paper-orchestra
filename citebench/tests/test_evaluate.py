@@ -272,7 +272,10 @@ def test_mcnemar_pair_known_counts(tmp_path):
     assert (ab["n"], ab["a_only_correct"], ab["b_only_correct"]) == (8, 6, 0)
     assert ab["p"] == pytest.approx(2 / 64)  # exact binomial, b+c=6
     ac = next(x for x in r if (x["judge_a"], x["judge_b"]) == ("a", "c"))
-    assert ac["n"] == 1  # only units both scored
+    # D27: primary counts c's seven missing units as wrong; "excl" keeps only the unit both scored
+    assert (ac["n"], ac["missing_a"], ac["missing_b"]) == (8, 0, 7)
+    assert (ac["a_only_correct"], ac["b_only_correct"]) == (7, 0)
+    assert ac["excl"]["n"] == 1 and ac["excl"]["a_only_correct"] == 0
 
 
 def test_holm_across_three_comparisons(tmp_path):
@@ -294,24 +297,30 @@ def test_holm_across_three_comparisons(tmp_path):
     assert by[("a", "c")]["p_holm"] == pytest.approx(0.5)
 
 
-def test_e3_pairs_shared_units_and_d25(tmp_path):
+def test_e3_missing_wrong_primary_and_excl_secondary(tmp_path):
     gold_rows = [{"unit_id": f"u{i}", "support": S, "access_level": al}
-                 for i, al in enumerate(["full_text", "full_text", "full_text", "abstract", "full_text"])]
+                 for i, al in enumerate(["full_text", "full_text", "full_text", "abstract", "full_text", None])]
     pred = []
-    for i, (ab, co) in enumerate([(N, S), (S, S), (N, S), (N, S), (S, S)]):
+    for i, (ab, co) in enumerate([(N, S), (S, S), (N, S), (N, S), (S, S), (S, S)]):
         pred.append({"unit_id": f"u{i}", "judge": "j", "condition": "abstract_only", "support": ab})
-        if i != 4:  # u4 has no 'correct' prediction: not shared
+        if i != 4:  # u4 has no 'correct' prediction: missing
             pred.append({"unit_id": f"u{i}", "judge": "j", "condition": "correct", "support": co})
     g, p = _gold_pred(tmp_path, gold_rows, pred)
     r = ev.e3_files(g, p, n_boot=20)[0]
-    # shared u0..u3, u3 excluded (abstract) -> n=3; abstract_only right on u1 only, correct right on all
-    assert (r["n"], r["n_excluded"], r["exclusion_applied"]) == (3, 1, True)
-    assert r["acc_abstract_only"] == pytest.approx(1 / 3) and r["acc_correct"] == 1.0
-    assert r["diff"][0] == pytest.approx(-2 / 3)
+    # D25: u3 (abstract) and u5 (no access_level) excluded; u0, u1, u2, u4 kept
+    assert (r["n"], r["n_excluded"], r["exclusion_applied"]) == (4, 2, True)
+    assert r["excluded_reasons"] == {"abstract": 1, "missing_field": 1}
+    assert (r["missing_abstract_only"], r["missing_correct"]) == (0, 1)
+    # primary: abstract_only right on u1, u4; correct right on u0, u1, u2 (u4 missing = wrong)
+    assert r["acc_abstract_only"] == pytest.approx(2 / 4) and r["acc_correct"] == pytest.approx(3 / 4)
+    assert r["diff"][0] == pytest.approx(-0.25)
+    assert (r["abstract_only_right"], r["correct_right"]) == (1, 2)
+    # secondary: u4 dropped -> u0, u1, u2
+    e = r["excl"]
+    assert e["n"] == 3 and e["acc_abstract_only"] == pytest.approx(1 / 3) and e["acc_correct"] == 1.0
+    assert e["diff"][0] == pytest.approx(-2 / 3) and e["p"] == pytest.approx(0.5)
     # macro-F1: abstract_only S f1=.5, N f1=0 (predicted only) -> .25; correct 1.0
-    assert r["f1_diff"][0] == pytest.approx(-0.75) and r["f1_diff"][1] <= -0.75 <= r["f1_diff"][2]
-    assert (r["abstract_only_right"], r["correct_right"]) == (0, 2)
-    assert r["p"] == pytest.approx(0.5)
+    assert e["f1_diff"][0] == pytest.approx(-0.75) and e["f1_diff"][1] <= -0.75 <= e["f1_diff"][2]
 
 
 def test_e3_without_access_field_notes_it(tmp_path, capsys):
@@ -323,6 +332,39 @@ def test_e3_without_access_field_notes_it(tmp_path, capsys):
     assert ev.main(["--gold", g, "--pred", p, "--by", "condition", "--n-boot", "10",
                     "--e3", "--compare", "--json", str(out_json)]) == 0
     out = capsys.readouterr().out
-    assert "could not be applied" in out and "E3 judge=j: n=1 excluded=0" in out
+    assert "could not be applied" in out and "E3 judge=j (missing counted wrong): n=1" in out
     data = json.loads(out_json.read_text())
     assert {"results", "e3", "compare"} <= set(data)
+
+
+def test_cli_compare_and_e3_without_by(tmp_path, capsys):
+    g, p = _gold_pred(
+        tmp_path, [{"unit_id": "u0", "support": S}],
+        [{"unit_id": "u0", "judge": j, "condition": c, "support": S}
+         for j in ("a", "b") for c in ("abstract_only", "correct")])
+    assert ev.main(["--gold", g, "--pred", p, "--n-boot", "10", "--compare", "--e3"]) == 0
+    out = capsys.readouterr().out
+    assert "condition=correct" in out and "compare a vs b" in out and "E3 judge=a" in out
+
+
+def test_survey_cluster_ci_in_summary(tmp_path):
+    gold = [{"unit_id": f"u{i}", "support": S, "survey_id": f"s{i % 3}"} for i in range(6)]
+    pred = [{"unit_id": f"u{i}", "judge": "j", "support": S if i % 2 else N} for i in range(6)]
+    g, p = _gold_pred(tmp_path, gold, pred)
+    row = ev.evaluate_files(g, p, n_boot=50)[0][("j", None)]
+    pt, lo, hi = row["acc_cluster"]
+    assert pt == pytest.approx(0.5) and lo <= pt <= hi
+    assert "survey-cluster bootstrap (missing counted wrong)" in ev.format_report({("j", None): row})
+    g2, p2 = _gold_pred(tmp_path, [{"unit_id": "u0", "support": S}], [{"unit_id": "u0", "judge": "j", "support": S}])
+    row2 = ev.evaluate_files(g2, p2, n_boot=10)[0][("j", None)]
+    assert row2["acc_cluster"] is None and "not available" in ev.format_report({("j", None): row2})
+
+
+def test_json_writes_null_for_nan(tmp_path):
+    g, p = _gold_pred(
+        tmp_path, [{"unit_id": "u0", "support": S, "access_level": "abstract"}],
+        [{"unit_id": "u0", "judge": "j", "condition": c, "support": S} for c in ("abstract_only", "correct")])
+    out = tmp_path / "o.json"
+    assert ev.main(["--gold", g, "--pred", p, "--n-boot", "10", "--e3", "--json", str(out)]) == 0
+    data = json.loads(out.read_text(), parse_constant=lambda c: pytest.fail(c))  # NaN would call this
+    assert data["e3"][0]["n"] == 0 and data["e3"][0]["acc_correct"] is None
