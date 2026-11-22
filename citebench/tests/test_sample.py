@@ -99,3 +99,24 @@ def test_reliability_subset_proportional_and_manifest_has_no_text():
     m = json.dumps(manifest(final, {"unmet": {}}))
     assert "SECRET" not in m and "sentence_text" not in m and "title" not in m
     assert json.loads(m)["counts"]["reliability"] == 50
+
+
+def test_materialize(tmp_path, capsys):
+    from citebench.sample import main
+    from citebench.units import read_jsonl, write_jsonl
+
+    us = [unit("s1", n, EV, key=f"k{n}") for n in range(4)]
+    d = tmp_path / "units"
+    d.mkdir()
+    write_jsonl(d / "s1.jsonl", us)
+    m = [{k: getattr(u, k) for k in ("unit_id", "survey_id", "char_start", "char_end", "cite_key")} for u in (us[3], us[1])]
+    mp = tmp_path / "m.json"
+    mp.write_text(json.dumps({"units": m}), encoding="utf-8")
+    out = tmp_path / "o.jsonl"
+    assert main(["materialize", "--manifest", str(mp), "--units-dir", str(d), "--out", str(out)]) == 0
+    got = list(read_jsonl(out, Unit))
+    assert [u.unit_id for u in got] == [us[3].unit_id, us[1].unit_id] and got[0].sentence_text == EV
+    for bad in ({"unit_id": "nope"}, {"char_end": 999}, {"cite_key": "zz"}):
+        mp.write_text(json.dumps({"units": [{**m[0], **bad}]}), encoding="utf-8")
+        assert main(["materialize", "--manifest", str(mp), "--units-dir", str(d), "--out", str(out)]) == 1
+        assert "error:" in capsys.readouterr().err
